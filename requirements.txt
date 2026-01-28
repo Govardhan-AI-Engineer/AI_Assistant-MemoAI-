@@ -1,0 +1,46 @@
+# Core Dependencies
+python-dotenv>=1.0.0
+
+# Transcription (Free & Open-Source)
+openai-whisper>=20231117
+torch>=2.0.0
+torchaudio>=2.0.0
+ffmpeg-python>=0.2.0
+
+# Online Media
+yt-dlp>=2023.11.16
+requests>=2.31.0
+
+# Translation
+googletrans==4.0.0rc1
+deep-translator>=1.11.4
+
+# Subtitle Processing
+pysrt>=1.1.2
+webvtt-py>=0.4.6
+
+# Export & TTS
+gtts>=2.4.0
+pyttsx3>=2.90
+pydub>=0.25.1
+
+# Database & Storage
+sqlalchemy>=2.0.23
+
+# RAG & Vector Search (Task 4)
+sentence-transformers>=2.2.2
+faiss-cpu>=1.7.4
+# Alternative: chromadb>=0.4.15
+
+# API Framework (Optional)
+fastapi>=0.104.1
+uvicorn>=0.24.0
+
+# Utilities
+pydantic>=2.5.0
+python-multipart>=0.0.6
+
+# Development
+pytest>=7.4.3
+black>=23.11.0
+pylint>=3.0.2
