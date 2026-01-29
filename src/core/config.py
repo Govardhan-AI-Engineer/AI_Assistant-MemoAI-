@@ -20,7 +20,8 @@ class Config:
     EXPORTS_DIR = DATA_DIR / "exports"
     
     # Transcription settings (Whisper - Free & Open-Source)
-    WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")  # tiny, base, small, medium, large
+    # Default to medium for better accuracy across all languages
+    WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")  # tiny, base, small, medium, large
     PARAGRAPH_WORD_COUNT = int(os.getenv("PARAGRAPH_WORD_COUNT", "50"))
     WHISPER_TEMPERATURE = float(os.getenv("WHISPER_TEMPERATURE", "0"))  # 0 = deterministic, higher = more variation
     # For better accuracy with non-English languages, use larger models (small, medium, or large)

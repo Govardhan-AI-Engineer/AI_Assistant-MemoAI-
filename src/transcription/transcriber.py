@@ -86,20 +86,28 @@ class Transcriber:
             print(f"Transcribing: {audio_path}")
             temp = temperature if temperature is not None else Config.WHISPER_TEMPERATURE
             
-            # Universal parameters - optimized to prevent repetition
-            # For Telugu and similar languages, use minimal parameters to avoid repetition
+            # Universal parameters - optimized for STRONG transcription quality
+            # Balanced parameters to prevent repetition while maintaining accuracy
             transcribe_params = {
                 'language': language,  # None = auto-detect
                 'task': task,
                 'verbose': False,
                 'temperature': temp,
-                'condition_on_previous_text': False,  # Set to False to prevent repetition
-                'beam_size': 1,  # Use greedy decoding (beam_size=1) to prevent repetition
+                # Use conditional text for better context, but with careful thresholds
+                'condition_on_previous_text': True,  # Enable for better context
+                'beam_size': 5,  # Use beam search for better accuracy (medium/large models handle this well)
+                'best_of': 5,  # Try multiple candidates for best result
                 'patience': 1.0,
-                'compression_ratio_threshold': 2.4,  # Stricter threshold
+                'compression_ratio_threshold': 2.4,  # Stricter threshold to catch repetition
                 'logprob_threshold': -1.0,
                 'no_speech_threshold': 0.6,
             }
+            
+            # For smaller models (tiny/base), use simpler parameters to avoid repetition
+            if self.model_name in ['tiny', 'base']:
+                transcribe_params['beam_size'] = 1  # Greedy decoding for small models
+                transcribe_params['best_of'] = 1
+                transcribe_params['condition_on_previous_text'] = False
             
             # Remove best_of - it can cause repetition
             # Only use beam_size=1 (greedy) for better results without repetition
@@ -165,9 +173,13 @@ class Transcriber:
                 # reload with large model to prevent repetition (compression_ratio > 7)
                 if effective_language == 'te' and self.model_name in ['tiny', 'base', 'small', 'medium']:
                     print(f"\n⚠️  Telugu detected with {self.model_name} model - upgrading to large model")
-                    print(f"   (Small/medium models cause repetition issues with Telugu - compression_ratio > 7)")
                     print(f"   (Large model ensures correct Telugu script without repetition)")
                     self.reload_model('large')
+                # For Hindi and other Indian languages, upgrade to medium if using smaller models
+                elif effective_language in ['hi', 'ta', 'kn', 'ml', 'bn', 'mr', 'gu', 'pa', 'or', 'as'] and self.model_name in ['tiny', 'base', 'small']:
+                    print(f"\n⚠️  {effective_language.upper()} detected with {self.model_name} model - upgrading to medium model")
+                    print(f"   (Medium model ensures strong transcription quality)")
+                    self.reload_model('medium')
                 
                 # Re-transcribe with language-specific prompt if available
                 # For Telugu, DON'T use initial_prompt - it causes repetition
@@ -190,11 +202,14 @@ class Transcriber:
                     transcribe_params['task'] = 'transcribe'
                     result = self.model.transcribe(str(audio_path), **transcribe_params)
             else:
-                # Language was specified
+                # Language was specified (or passed from service.py after detection)
                 effective_language = language
                 if language != 'en':
                     transcribe_params['task'] = 'transcribe'  # Force transcribe, not translate
-                    print(f"Language: {language} - Using 'transcribe' mode (not translate)")
+                    print(f"Transcribing with language: {language} (transcribe mode)")
+                
+                # Set language in params for accurate transcription
+                transcribe_params['language'] = language
                 
                 # For Telugu, DON'T use initial_prompt - it causes repetition
                 # For other languages, use initial prompt if available
@@ -205,6 +220,7 @@ class Transcriber:
                     transcribe_params['initial_prompt'] = language_prompts[language]
                     print(f"Using {language.upper()}-specific guidance")
                 
+                # Single transcription pass with language and prompt (no redundant detection)
                 result = self.model.transcribe(str(audio_path), **transcribe_params)
             
             # Post-processing: Validation and quality checks
@@ -428,13 +444,13 @@ class Transcriber:
                     f"Use --model medium for Hindi. "
                     f"Command: python main.py {file_path.name} --language hi --model medium"
                 )
-            elif compression_ratio > 4.0:
-                # For small model, allow slightly higher compression ratio
+            elif compression_ratio > 3.0:
+                # Stricter threshold for Hindi - medium model should handle this well
                 print(f"\n❌ ERROR: High compression ratio ({compression_ratio:.2f}) indicates repetition!")
                 raise TranscriptionError(
                     f"Hindi transcription failed: Repetition detected (compression_ratio={compression_ratio:.2f}). "
-                    f"Try using --model small with proper language specification. "
-                    f"Command: python main.py {file_path.name} --language hi --model small"
+                    f"Use --model medium for Hindi to ensure strong transcription. "
+                    f"Command: python main.py {file_path.name} --language hi --model medium"
                 )
             elif has_correct_script and compression_ratio <= 2.5:
                 print(f"✅ Verified: Output contains Devanagari script (compression_ratio: {compression_ratio:.2f})")
@@ -448,13 +464,13 @@ class Transcriber:
                     f"Use --model medium for {script_name}. "
                     f"Command: python main.py {file_path.name} --language {language} --model medium"
                 )
-            elif compression_ratio > 4.0:
-                # For small model, allow slightly higher compression ratio
+            elif compression_ratio > 3.0:
+                # Stricter threshold - medium model should handle this well
                 print(f"\n❌ ERROR: High compression ratio ({compression_ratio:.2f}) indicates repetition!")
                 raise TranscriptionError(
                     f"{script_name} transcription failed: Repetition detected (compression_ratio={compression_ratio:.2f}). "
-                    f"Try using --model small with proper language specification. "
-                    f"Command: python main.py {file_path.name} --language {language} --model small"
+                    f"Use --model medium for {script_name} to ensure strong transcription. "
+                    f"Command: python main.py {file_path.name} --language {language} --model medium"
                 )
             elif has_correct_script and compression_ratio <= 2.5:
                 print(f"✅ Verified: Output contains {script_name} script (compression_ratio: {compression_ratio:.2f})")
