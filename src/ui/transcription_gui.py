@@ -15,6 +15,18 @@ from src.transcription.url_handler import URLHandler
 from src.core.config import Config
 from src.core.exceptions import TranscriptionError
 from datetime import datetime
+# Import authentication and memory modules
+try:
+    from src.auth import AuthService
+    from src.memory import StorageService, SearchService, NoteService
+    AUTH_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Auth/Memory modules not available: {e}")
+    AUTH_AVAILABLE = False
+    AuthService = None
+    StorageService = None
+    SearchService = None
+    NoteService = None
 # Import export modules with error handling
 try:
     from src.export import SubtitleGenerator, DocumentExporter, TTSSynthesizer
@@ -25,11 +37,176 @@ except ImportError as e:
     TTSSynthesizer = None
 
 
-class TranscriptionGUI:
-    """GUI for transcription with language selection and translation"""
+class LoginDialog:
+    """Login/Registration dialog"""
     
     def __init__(self, root: tk.Tk):
         self.root = root
+        self.user_id = None
+        self.auth_service = AuthService() if AUTH_AVAILABLE else None
+        
+        if not self.auth_service:
+            raise ImportError("Authentication service not available. Install dependencies.")
+        
+        # Create login window
+        self.dialog = tk.Toplevel(root)
+        self.dialog.title("MemoAI - Login / Register")
+        self.dialog.geometry("400x320")
+        self.dialog.resizable(False, False)
+        self.dialog.transient(root)
+        self.dialog.grab_set()
+        
+        # Center the window
+        self.dialog.update_idletasks()
+        x = (self.dialog.winfo_screenwidth() // 2) - (400 // 2)
+        y = (self.dialog.winfo_screenheight() // 2) - (320 // 2)
+        self.dialog.geometry(f"400x320+{x}+{y}")
+        
+        # Variables
+        self.mode = tk.StringVar(value="login")  # "login" or "register"
+        self.username = tk.StringVar()
+        self.password = tk.StringVar()
+        
+        self._create_widgets()
+        
+        # Focus on username entry
+        self.username_entry.focus()
+        
+        # Handle window close
+        self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
+    
+    def _create_widgets(self):
+        """Create login/registration widgets"""
+        # Title
+        title_label = ttk.Label(
+            self.dialog,
+            text="MemoAI - Authentication",
+            font=("Arial", 16, "bold")
+        )
+        title_label.pack(pady=20)
+        
+        # Mode selection (Login/Register)
+        mode_frame = ttk.Frame(self.dialog)
+        mode_frame.pack(pady=10)
+        
+        ttk.Radiobutton(
+            mode_frame,
+            text="Login",
+            variable=self.mode,
+            value="login",
+            command=self._switch_mode
+        ).pack(side=tk.LEFT, padx=10)
+        
+        ttk.Radiobutton(
+            mode_frame,
+            text="Register",
+            variable=self.mode,
+            value="register",
+            command=self._switch_mode
+        ).pack(side=tk.LEFT, padx=10)
+        
+        # Form frame
+        form_frame = ttk.Frame(self.dialog)
+        form_frame.pack(pady=20, padx=40, fill=tk.BOTH, expand=True)
+        
+        # Username
+        ttk.Label(form_frame, text="Username:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.username_entry = ttk.Entry(form_frame, textvariable=self.username, width=25)
+        self.username_entry.grid(row=0, column=1, pady=5, padx=10)
+        
+        # Password
+        ttk.Label(form_frame, text="Password:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.password_entry = ttk.Entry(form_frame, textvariable=self.password, width=25, show="*")
+        self.password_entry.grid(row=1, column=1, pady=5, padx=10)
+        
+        # Status label
+        self.status_label = ttk.Label(form_frame, text="", foreground="red", wraplength=300)
+        self.status_label.grid(row=2, column=0, columnspan=2, pady=10)
+        
+        # Buttons
+        button_frame = ttk.Frame(form_frame)
+        button_frame.grid(row=3, column=0, columnspan=2, pady=20)
+        
+        self.submit_button = ttk.Button(
+            button_frame,
+            text="Login",
+            command=self._submit
+        )
+        self.submit_button.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(
+            button_frame,
+            text="Cancel",
+            command=self._on_close
+        ).pack(side=tk.LEFT, padx=5)
+        
+        # Bind Enter key
+        self.password_entry.bind("<Return>", lambda e: self._submit())
+        self.username_entry.bind("<Return>", lambda e: self.password_entry.focus())
+    
+    def _switch_mode(self):
+        """Switch between login and register mode"""
+        mode = self.mode.get()
+        if mode == "login":
+            self.submit_button.config(text="Login")
+        else:
+            self.submit_button.config(text="Register")
+        self.status_label.config(text="")
+    
+    def _submit(self):
+        """Handle login/registration"""
+        username = self.username.get().strip()
+        password = self.password.get()
+        
+        if not username or not password:
+            self.status_label.config(text="Please enter username and password")
+            return
+        
+        mode = self.mode.get()
+        
+        if mode == "register":
+            # Register new user
+            success, user_id, error = self.auth_service.register_user(username, password)
+            if success:
+                self.user_id = user_id
+                self.status_label.config(text="Registration successful! Logging in...", foreground="green")
+                self.dialog.after(500, self._close)
+            else:
+                self.status_label.config(text=f"Registration failed: {error}", foreground="red")
+        else:
+            # Login
+            success, user_id, error = self.auth_service.login_user(username, password)
+            if success:
+                self.user_id = user_id
+                self.status_label.config(text="Login successful!", foreground="green")
+                self.dialog.after(500, self._close)
+            else:
+                self.status_label.config(text=f"Login failed: {error}", foreground="red")
+    
+    def _on_close(self):
+        """Handle window close"""
+        if self.user_id is None:
+            # User didn't login, exit application
+            self.root.quit()
+        else:
+            self.dialog.destroy()
+    
+    def _close(self):
+        """Close dialog"""
+        self.dialog.destroy()
+    
+    def show(self) -> Optional[int]:
+        """Show dialog and return user_id"""
+        self.dialog.wait_window()
+        return self.user_id
+
+
+class TranscriptionGUI:
+    """GUI for transcription with language selection and translation"""
+    
+    def __init__(self, root: tk.Tk, user_id: int):
+        self.root = root
+        self.user_id = user_id  # Store logged-in user ID
         self.root.title("MemoAI - Transcription & Translation Assistant")
         self.root.geometry("1000x750")  # Reduced height for better fit
         self.root.resizable(True, True)
@@ -40,6 +217,34 @@ class TranscriptionGUI:
         # Initialize services
         self.service = TranscriptionService(use_robust_pipeline=True)
         self.url_handler = URLHandler()
+        
+        # Initialize memory services (for database storage)
+        if AUTH_AVAILABLE:
+            try:
+                self.storage_service = StorageService()
+                self.search_service = SearchService()
+                self.note_service = NoteService(self.storage_service)
+                print("✓ Memory services initialized")
+                
+                # Get user info for display
+                try:
+                    from src.auth import AuthService
+                    auth = AuthService()
+                    user_info = auth.get_user_by_id(user_id)
+                    self.username = user_info.get('username', 'Unknown') if user_info else 'Unknown'
+                except Exception:
+                    self.username = 'Unknown'
+            except Exception as e:
+                print(f"Warning: Memory services not available: {e}")
+                self.storage_service = None
+                self.search_service = None
+                self.note_service = None
+                self.username = 'Unknown'
+        else:
+            self.storage_service = None
+            self.search_service = None
+            self.note_service = None
+            self.username = 'Guest'
         
         # Initialize robust translation integration (with error handling)
         # Use robust translator for better code-mixed speech handling
@@ -86,6 +291,8 @@ class TranscriptionGUI:
         # Store transcription result temporarily
         self.current_transcription: Optional[Dict] = None
         self.translations: Dict[str, str] = {}  # Store multiple translations: {target_lang: translated_text}
+        self.current_document_id: Optional[str] = None  # Database document ID
+        self.current_transcript_id: Optional[int] = None  # Database transcript ID
         
         self._create_widgets()
     
@@ -139,13 +346,27 @@ class TranscriptionGUI:
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(1, weight=1)
         
-        # Title
+        # Title and user info
+        title_frame = ttk.Frame(main_frame)
+        title_frame.grid(row=0, column=0, columnspan=3, pady=(0, 20), sticky=(tk.W, tk.E))
+        title_frame.columnconfigure(0, weight=1)
+        
         title_label = ttk.Label(
-            main_frame,
+            title_frame,
             text="🎤 MemoAI Transcription Assistant",
             font=("Arial", 16, "bold")
         )
-        title_label.grid(row=0, column=0, columnspan=3, pady=(0, 20))
+        title_label.grid(row=0, column=0, sticky=tk.W)
+        
+        # User info label
+        if hasattr(self, 'username'):
+            user_info_label = ttk.Label(
+                title_frame,
+                text=f"👤 User: {self.username}",
+                font=("Arial", 9),
+                foreground="gray"
+            )
+            user_info_label.grid(row=0, column=1, sticky=tk.E, padx=10)
         
         # Input Type Selection
         input_frame = ttk.LabelFrame(main_frame, text="Input Source", padding="10")
@@ -604,6 +825,8 @@ class TranscriptionGUI:
         # Clear previous transcription and translations (override)
         self.current_transcription = None
         self.translations = {}
+        self.current_document_id = None
+        self.current_transcript_id = None
         self.translation_frame.grid_remove()
         self.translate_button.config(state=tk.DISABLED)
         self.translations_text.delete(1.0, tk.END)
@@ -931,6 +1154,32 @@ class TranscriptionGUI:
                     'target_language': target_language
                 }
                 print(f"DEBUG: Translation stored for {target_language}")
+                
+                # Save translation to database if storage service is available
+                if self.storage_service and hasattr(self, 'current_transcript_id') and self.current_transcript_id:
+                    try:
+                        # Get translated paragraphs and segments if available
+                        translated_paragraphs = None
+                        translated_segments = None
+                        
+                        translation_data = translation_result.get('translation', {})
+                        if translation_data:
+                            translated_paragraphs = translation_data.get('paragraphs')
+                            translated_segments = translation_data.get('segments')
+                        
+                        self.storage_service.save_translation(
+                            user_id=self.user_id,
+                            transcript_id=self.current_transcript_id,
+                            translated_text=translated_text,
+                            source_language=self.current_transcription.get('language', 'auto'),
+                            target_language=target_language,
+                            provider=translation_result.get('provider', 'unknown'),
+                            translated_paragraphs=translated_paragraphs,
+                            translated_segments=translated_segments
+                        )
+                        print(f"✓ Translation saved to database for {target_language}")
+                    except Exception as e:
+                        print(f"Warning: Failed to save translation to database: {e}")
             else:
                 print(f"WARNING: Empty translation result for {target_language}")
             
@@ -1676,7 +1925,41 @@ class TranscriptionGUI:
 def main():
     """Run the GUI application"""
     root = tk.Tk()
-    app = TranscriptionGUI(root)
+    root.withdraw()  # Hide main window initially
+    
+    # Show login dialog first
+    if AUTH_AVAILABLE:
+        try:
+            login_dialog = LoginDialog(root)
+            user_id = login_dialog.show()
+            
+            if user_id is None:
+                # User cancelled login, exit
+                root.destroy()
+                return
+            
+            # Show main window and create GUI with user_id
+            root.deiconify()
+            app = TranscriptionGUI(root, user_id)
+        except Exception as e:
+            messagebox.showerror(
+                "Authentication Error",
+                f"Failed to initialize authentication:\n{str(e)}\n\n"
+                "Please ensure all dependencies are installed."
+            )
+            root.destroy()
+            return
+    else:
+        # Fallback: run without authentication (for backward compatibility)
+        messagebox.showwarning(
+            "Authentication Not Available",
+            "Authentication module not available.\n"
+            "Running in compatibility mode without user isolation.\n\n"
+            "Install dependencies to enable full features."
+        )
+        root.deiconify()
+        app = TranscriptionGUI(root, user_id=0)  # Use 0 as default (no isolation)
+    
     root.mainloop()
 
 

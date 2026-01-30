@@ -23,6 +23,9 @@ wheels/
 .installed.cfg
 *.egg
 
+# Node.js
+node_modules/
+
 # IDE
 .vscode/
 .idea/
@@ -53,4 +56,3 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
-

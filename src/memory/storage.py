@@ -1,0 +1,509 @@
+"""
+Persistent storage service for transcripts, translations, and notes
+Ensures user isolation and immutable document storage
+"""
+import secrets
+from typing import Optional, Dict, List, Any
+from datetime import datetime
+from sqlalchemy import create_engine, and_
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.exc import IntegrityError
+
+from src.memory.models import (
+    Transcript, Translation, Note, Tag, TranscriptTag, NoteTag, ExportFile
+)
+from src.core.config import Config
+
+
+class StorageService:
+    """
+    Persistent storage service with user isolation
+    Ensures immutable documents (no overwrites)
+    """
+    
+    def __init__(self, database_url: Optional[str] = None):
+        """
+        Initialize storage service
+        
+        Args:
+            database_url: Database URL (defaults to Config.DATABASE_URL)
+        """
+        self.database_url = database_url or Config.DATABASE_URL
+        self.engine = create_engine(self.database_url, echo=False)
+        self.SessionLocal = sessionmaker(bind=self.engine)
+        
+        # Create tables
+        from src.core.database import Base
+        Base.metadata.create_all(self.engine)
+    
+    def _generate_document_id(self) -> str:
+        """Generate unique document ID"""
+        return secrets.token_urlsafe(32)
+    
+    def save_transcript(
+        self,
+        user_id: int,
+        text: str,
+        language: str,
+        source_file: Optional[str] = None,
+        source_url: Optional[str] = None,
+        source_type: str = "file",
+        model_used: Optional[str] = None,
+        paragraphs: Optional[List[Dict]] = None,
+        segments: Optional[List[Dict]] = None,
+        document_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Save transcript as immutable document
+        
+        Args:
+            user_id: User ID (for isolation)
+            text: Transcript text
+            language: Language code
+            source_file: Source file path (if file)
+            source_url: Source URL (if URL)
+            source_type: Type of source ('file', 'url', 'subtitle')
+            model_used: Whisper model used
+            paragraphs: Paragraph-level data
+            segments: Segment-level data
+            document_id: Optional document ID (generates new if None)
+            
+        Returns:
+            Dictionary with document_id and transcript data
+        """
+        db: Session = self.SessionLocal()
+        try:
+            # Generate unique document ID if not provided
+            if not document_id:
+                document_id = self._generate_document_id()
+                # Ensure uniqueness
+                while db.query(Transcript).filter(Transcript.document_id == document_id).first():
+                    document_id = self._generate_document_id()
+            
+            # Create new transcript (never overwrite existing)
+            transcript = Transcript(
+                document_id=document_id,
+                user_id=user_id,
+                source_file=source_file,
+                source_url=source_url,
+                source_type=source_type,
+                text=text,
+                language=language,
+                model_used=model_used,
+                paragraphs=paragraphs or [],
+                segments=segments or []
+            )
+            
+            db.add(transcript)
+            db.commit()
+            db.refresh(transcript)
+            
+            return {
+                'document_id': transcript.document_id,
+                'id': transcript.id,
+                'user_id': transcript.user_id,
+                'created_at': transcript.created_at.isoformat() if transcript.created_at else None
+            }
+            
+        except IntegrityError:
+            db.rollback()
+            raise ValueError(f"Document ID {document_id} already exists")
+        except Exception as e:
+            db.rollback()
+            raise Exception(f"Failed to save transcript: {str(e)}")
+        finally:
+            db.close()
+    
+    def save_translation(
+        self,
+        user_id: int,
+        transcript_id: int,
+        translated_text: str,
+        source_language: str,
+        target_language: str,
+        provider: Optional[str] = None,
+        translated_paragraphs: Optional[List[Dict]] = None,
+        translated_segments: Optional[List[Dict]] = None
+    ) -> Dict[str, Any]:
+        """
+        Save translation linked to transcript
+        
+        Args:
+            user_id: User ID (for isolation)
+            transcript_id: Transcript ID
+            translated_text: Translated text
+            source_language: Source language code
+            target_language: Target language code
+            provider: Translation provider used
+            translated_paragraphs: Translated paragraphs
+            translated_segments: Translated segments
+            
+        Returns:
+            Dictionary with translation data
+        """
+        db: Session = self.SessionLocal()
+        try:
+            # Verify transcript belongs to user
+            transcript = db.query(Transcript).filter(
+                and_(Transcript.id == transcript_id, Transcript.user_id == user_id)
+            ).first()
+            
+            if not transcript:
+                raise ValueError("Transcript not found or access denied")
+            
+            # Check if translation already exists for this language
+            existing = db.query(Translation).filter(
+                and_(
+                    Translation.transcript_id == transcript_id,
+                    Translation.target_language == target_language,
+                    Translation.user_id == user_id
+                )
+            ).first()
+            
+            if existing:
+                # Update existing translation (allow updates for same language)
+                existing.translated_text = translated_text
+                existing.translated_paragraphs = translated_paragraphs or []
+                existing.translated_segments = translated_segments or []
+                existing.provider = provider
+                translation = existing
+            else:
+                # Create new translation
+                translation = Translation(
+                    transcript_id=transcript_id,
+                    user_id=user_id,
+                    source_language=source_language,
+                    target_language=target_language,
+                    translated_text=translated_text,
+                    translated_paragraphs=translated_paragraphs or [],
+                    translated_segments=translated_segments or [],
+                    provider=provider
+                )
+                db.add(translation)
+            
+            db.commit()
+            db.refresh(translation)
+            
+            return {
+                'id': translation.id,
+                'transcript_id': translation.transcript_id,
+                'target_language': translation.target_language,
+                'created_at': translation.created_at.isoformat() if translation.created_at else None
+            }
+            
+        except Exception as e:
+            db.rollback()
+            raise Exception(f"Failed to save translation: {str(e)}")
+        finally:
+            db.close()
+    
+    def get_transcript(self, user_id: int, document_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get transcript by document ID (user-isolated)
+        
+        Args:
+            user_id: User ID
+            document_id: Document ID
+            
+        Returns:
+            Transcript dictionary or None if not found
+        """
+        db: Session = self.SessionLocal()
+        try:
+            transcript = db.query(Transcript).filter(
+                and_(Transcript.document_id == document_id, Transcript.user_id == user_id)
+            ).first()
+            
+            if not transcript:
+                return None
+            
+            return self._transcript_to_dict(transcript)
+        finally:
+            db.close()
+    
+    def get_user_transcripts(
+        self,
+        user_id: int,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        language: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all transcripts for user (user-isolated)
+        
+        Args:
+            user_id: User ID
+            limit: Maximum number of results
+            offset: Offset for pagination
+            language: Filter by language code
+            
+        Returns:
+            List of transcript dictionaries
+        """
+        db: Session = self.SessionLocal()
+        try:
+            query = db.query(Transcript).filter(Transcript.user_id == user_id)
+            
+            if language:
+                query = query.filter(Transcript.language == language)
+            
+            query = query.order_by(Transcript.created_at.desc())
+            
+            if limit:
+                query = query.limit(limit).offset(offset)
+            
+            transcripts = query.all()
+            return [self._transcript_to_dict(t) for t in transcripts]
+        finally:
+            db.close()
+    
+    def _transcript_to_dict(self, transcript: Transcript) -> Dict[str, Any]:
+        """Convert transcript model to dictionary"""
+        return {
+            'id': transcript.id,
+            'document_id': transcript.document_id,
+            'user_id': transcript.user_id,
+            'source_file': transcript.source_file,
+            'source_url': transcript.source_url,
+            'source_type': transcript.source_type,
+            'text': transcript.text,
+            'language': transcript.language,
+            'model_used': transcript.model_used,
+            'paragraphs': transcript.paragraphs or [],
+            'segments': transcript.segments or [],
+            'created_at': transcript.created_at.isoformat() if transcript.created_at else None,
+            'updated_at': transcript.updated_at.isoformat() if transcript.updated_at else None
+        }
+    
+    def save_note(
+        self,
+        user_id: int,
+        transcript_id: int,
+        content: str,
+        language: str,
+        note_type: str = 'summary'
+    ) -> Dict[str, Any]:
+        """
+        Save canonical note (generated once, in original language)
+        
+        Args:
+            user_id: User ID
+            transcript_id: Transcript ID
+            content: Note content
+            language: Language of note (same as transcript)
+            note_type: Type of note ('summary', 'key_points', 'custom')
+            
+        Returns:
+            Dictionary with note data
+        """
+        db: Session = self.SessionLocal()
+        try:
+            # Verify transcript belongs to user
+            transcript = db.query(Transcript).filter(
+                and_(Transcript.id == transcript_id, Transcript.user_id == user_id)
+            ).first()
+            
+            if not transcript:
+                raise ValueError("Transcript not found or access denied")
+            
+            # Create new note
+            note = Note(
+                transcript_id=transcript_id,
+                user_id=user_id,
+                content=content,
+                language=language,
+                note_type=note_type
+            )
+            
+            db.add(note)
+            db.commit()
+            db.refresh(note)
+            
+            return {
+                'id': note.id,
+                'transcript_id': note.transcript_id,
+                'content': note.content,
+                'language': note.language,
+                'note_type': note.note_type,
+                'created_at': note.created_at.isoformat() if note.created_at else None
+            }
+            
+        except Exception as e:
+            db.rollback()
+            raise Exception(f"Failed to save note: {str(e)}")
+        finally:
+            db.close()
+    
+    def get_transcript_notes(self, user_id: int, transcript_id: int) -> List[Dict[str, Any]]:
+        """
+        Get all notes for a transcript (user-isolated)
+        
+        Args:
+            user_id: User ID
+            transcript_id: Transcript ID
+            
+        Returns:
+            List of note dictionaries
+        """
+        db: Session = self.SessionLocal()
+        try:
+            notes = db.query(Note).filter(
+                and_(Note.transcript_id == transcript_id, Note.user_id == user_id)
+            ).all()
+            
+            return [
+                {
+                    'id': note.id,
+                    'transcript_id': note.transcript_id,
+                    'content': note.content,
+                    'language': note.language,
+                    'note_type': note.note_type,
+                    'created_at': note.created_at.isoformat() if note.created_at else None
+                }
+                for note in notes
+            ]
+        finally:
+            db.close()
+    
+    def get_user_notes(self, user_id: int, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Get all notes for user (user-isolated)
+        
+        Args:
+            user_id: User ID
+            limit: Maximum number of results
+            
+        Returns:
+            List of note dictionaries
+        """
+        db: Session = self.SessionLocal()
+        try:
+            query = db.query(Note).filter(Note.user_id == user_id)
+            query = query.order_by(Note.created_at.desc())
+            
+            if limit:
+                query = query.limit(limit)
+            
+            notes = query.all()
+            return [
+                {
+                    'id': note.id,
+                    'transcript_id': note.transcript_id,
+                    'content': note.content,
+                    'language': note.language,
+                    'note_type': note.note_type,
+                    'created_at': note.created_at.isoformat() if note.created_at else None
+                }
+                for note in notes
+            ]
+        finally:
+            db.close()
+    
+    def save_export_file(
+        self,
+        user_id: int,
+        file_path: str,
+        file_type: str,  # 'subtitle', 'document', 'audio'
+        file_format: str,  # 'srt', 'vtt', 'md', 'txt', 'json', 'mp3', 'wav'
+        transcript_id: Optional[int] = None,
+        language: Optional[str] = None,
+        is_translated: bool = False,
+        file_size: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Save export file metadata to database
+        
+        Args:
+            user_id: User ID
+            file_path: Relative path from exports directory
+            file_type: Type of export ('subtitle', 'document', 'audio')
+            file_format: File format ('srt', 'vtt', 'md', 'txt', 'json', 'mp3', 'wav')
+            transcript_id: Optional transcript ID this export is linked to
+            language: Optional language code if translated
+            is_translated: Whether this is a translation export
+            file_size: File size in bytes
+            
+        Returns:
+            Export file dictionary
+        """
+        db: Session = self.SessionLocal()
+        try:
+            export_file = ExportFile(
+                user_id=user_id,
+                transcript_id=transcript_id,
+                file_path=file_path,
+                file_type=file_type,
+                file_format=file_format,
+                language=language,
+                is_translated=is_translated,
+                file_size=file_size
+            )
+            db.add(export_file)
+            db.commit()
+            db.refresh(export_file)
+            
+            return {
+                'id': export_file.id,
+                'transcript_id': export_file.transcript_id,
+                'file_path': export_file.file_path,
+                'file_type': export_file.file_type,
+                'file_format': export_file.file_format,
+                'language': export_file.language,
+                'is_translated': export_file.is_translated,
+                'file_size': export_file.file_size,
+                'created_at': export_file.created_at.isoformat() if export_file.created_at else None
+            }
+        finally:
+            db.close()
+    
+    def get_user_exports(
+        self,
+        user_id: int,
+        transcript_id: Optional[int] = None,
+        file_type: Optional[str] = None,  # 'subtitle', 'document', 'audio'
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get export files for user (user-isolated)
+        
+        Args:
+            user_id: User ID
+            transcript_id: Optional transcript ID to filter by
+            file_type: Optional file type to filter by
+            limit: Maximum number of results
+            
+        Returns:
+            List of export file dictionaries
+        """
+        db: Session = self.SessionLocal()
+        try:
+            query = db.query(ExportFile).filter(ExportFile.user_id == user_id)
+            
+            if transcript_id:
+                query = query.filter(ExportFile.transcript_id == transcript_id)
+            
+            if file_type:
+                query = query.filter(ExportFile.file_type == file_type)
+            
+            query = query.order_by(ExportFile.created_at.desc())
+            
+            if limit:
+                query = query.limit(limit)
+            
+            exports = query.all()
+            return [
+                {
+                    'id': exp.id,
+                    'transcript_id': exp.transcript_id,
+                    'file_path': exp.file_path,
+                    'file_type': exp.file_type,
+                    'file_format': exp.file_format,
+                    'language': exp.language,
+                    'is_translated': exp.is_translated,
+                    'file_size': exp.file_size,
+                    'created_at': exp.created_at.isoformat() if exp.created_at else None
+                }
+                for exp in exports
+            ]
+        finally:
+            db.close()
