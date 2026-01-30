@@ -29,7 +29,18 @@ class Config:
     
     # Translation settings
     DEFAULT_TRANSLATION_SERVICE = os.getenv("DEFAULT_TRANSLATION_SERVICE", "google")
-    TRANSLATION_SERVICES = ["google", "libretranslate", "deepl"]
+    TRANSLATION_SERVICES = ["google", "libre", "deepl"]
+    TRANSLATION_PROVIDER_PRIORITY = os.getenv(
+        "TRANSLATION_PROVIDER_PRIORITY",
+        "google,libre,deepl"
+    ).split(",")
+    ENABLE_RETRANSLATION = os.getenv("ENABLE_RETRANSLATION", "true").lower() == "true"
+    
+    # Translation API keys (from environment)
+    # DEEPL_API_KEY - Set in environment
+    # LIBRETRANSLATE_API_KEY - Set in environment (optional)
+    # LIBRETRANSLATE_API_URL - Set in environment (optional, defaults to public API)
+    # GROQ_API_KEY - Set in environment for AI Translation (get from https://console.groq.com)
     
     # Database
     DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATA_DIR}/memoai.db")
@@ -42,6 +53,11 @@ class Config:
         cls.TRANSCRIPTS_DIR.mkdir(exist_ok=True)
         cls.NOTES_DIR.mkdir(exist_ok=True)
         cls.EXPORTS_DIR.mkdir(exist_ok=True)
+        
+        # Create export subdirectories
+        (cls.EXPORTS_DIR / "subtitles").mkdir(exist_ok=True)
+        (cls.EXPORTS_DIR / "documents").mkdir(exist_ok=True)
+        (cls.EXPORTS_DIR / "audio").mkdir(exist_ok=True)
 
 # Initialize directories
 Config.setup_directories()
