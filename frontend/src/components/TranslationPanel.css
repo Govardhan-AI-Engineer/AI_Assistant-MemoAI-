@@ -1,8 +1,6 @@
 .translation-panel {
-  background: white;
-  padding: 20px;
-  border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  background: transparent;
+  padding: 0;
 }
 
 .translation-panel h2 {
@@ -59,18 +57,19 @@
 .submit-btn {
   width: 100%;
   padding: 12px;
-  background: #667eea;
+  background: #285d93;
   color: white;
   border: none;
-  border-radius: 5px;
+  border-radius: 4px;
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;
   transition: background 0.3s;
+  font-family: 'Helvetica', Arial, sans-serif;
 }
 
 .submit-btn:hover:not(:disabled) {
-  background: #5568d3;
+  background: #1f4a7a;
 }
 
 .submit-btn:disabled {

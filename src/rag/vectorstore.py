@@ -244,3 +244,7 @@ class FAISSVectorStore:
         self.metadata = []
         self._save_index()
         print(f"✅ Cleared vector store for user {self.user_id}")
+    
+    def delete_all(self):
+        """Delete all embeddings (alias for clear)"""
+        self.clear()

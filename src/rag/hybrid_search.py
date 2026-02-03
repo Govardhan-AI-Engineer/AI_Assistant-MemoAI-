@@ -43,6 +43,11 @@ class HybridSearch:
         # BM25 parameters
         self.k1 = 1.5  # Term frequency saturation parameter
         self.b = 0.75  # Length normalization parameter
+        
+        # BM25 cache for performance (refresh every 5 minutes)
+        self._bm25_cache = {}
+        self._cache_timestamp = None
+        self._cache_ttl = 300  # 5 minutes
     
     def _tokenize(self, text: str) -> List[str]:
         """Simple tokenization"""
@@ -176,21 +181,44 @@ class HybridSearch:
         
         return final_results[:top_k]
     
-    def _keyword_search(self, query: str, top_k: int) -> List[Tuple[Dict[str, Any], float]]:
-        """Perform keyword-based search using BM25"""
-        query_tokens = self._tokenize(query)
+    def clear_cache(self):
+        """Clear BM25 cache (call when new transcripts are indexed)"""
+        self._bm25_cache = {}
+        self._cache_timestamp = None
+    
+    def _get_bm25_data(self, force_refresh: bool = False):
+        """
+        Get or cache BM25 data for faster keyword search
         
-        if not query_tokens:
-            return []
+        Args:
+            force_refresh: Force refresh of cache
+            
+        Returns:
+            Dictionary with cached BM25 data
+        """
+        import time
+        current_time = time.time()
         
-        # Get all user transcripts for BM25 calculation
+        # Check if cache is valid (refresh every 5 minutes or on force)
+        if (not force_refresh and 
+            self._bm25_cache and 
+            self._cache_timestamp and 
+            (current_time - self._cache_timestamp) < self._cache_ttl):
+            return self._bm25_cache
+        
+        # Build cache - get all user transcripts
         transcripts = self.storage_service.get_user_transcripts(
             user_id=self.user_id,
             limit=10000
         )
         
         if not transcripts:
-            return []
+            return {
+                'all_docs': [],
+                'doc_freq': Counter(),
+                'avg_doc_length': 1.0,
+                'total_docs': 0
+            }
         
         # Build document frequency and tokenize all documents
         all_docs = []
@@ -208,6 +236,34 @@ class HybridSearch:
         # Calculate average document length
         avg_doc_length = sum(len(doc['tokens']) for doc in all_docs) / len(all_docs) if all_docs else 1.0
         
+        # Cache the data
+        self._bm25_cache = {
+            'all_docs': all_docs,
+            'doc_freq': doc_freq,
+            'avg_doc_length': avg_doc_length,
+            'total_docs': len(all_docs)
+        }
+        self._cache_timestamp = current_time
+        
+        return self._bm25_cache
+    
+    def _keyword_search(self, query: str, top_k: int) -> List[Tuple[Dict[str, Any], float]]:
+        """Perform keyword-based search using BM25 (with caching)"""
+        query_tokens = self._tokenize(query)
+        
+        if not query_tokens:
+            return []
+        
+        # Use cached BM25 data (much faster than loading from DB every time)
+        bm25_data = self._get_bm25_data()
+        all_docs = bm25_data['all_docs']
+        doc_freq = bm25_data['doc_freq']
+        avg_doc_length = bm25_data['avg_doc_length']
+        total_docs = bm25_data['total_docs']
+        
+        if not all_docs:
+            return []
+        
         # Score each document
         scored_docs = []
         for doc in all_docs:
@@ -216,7 +272,7 @@ class HybridSearch:
                 doc_tokens=doc['tokens'],
                 doc_freq=doc_freq,
                 avg_doc_length=avg_doc_length,
-                total_docs=len(all_docs)
+                total_docs=total_docs
             )
             
             if score > 0:

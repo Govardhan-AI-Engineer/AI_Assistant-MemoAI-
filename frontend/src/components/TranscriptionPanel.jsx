@@ -12,6 +12,7 @@ function TranscriptionPanel({ user, onTranscriptionComplete }) {
   const [processing, setProcessing] = useState(false)
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
+  const [elapsedTime, setElapsedTime] = useState(0)
 
   const handleFileChange = (e) => {
     setSelectedFile(e.target.files[0])
@@ -21,6 +22,13 @@ function TranscriptionPanel({ user, onTranscriptionComplete }) {
     e.preventDefault()
     setError('')
     setProcessing(true)
+    setElapsedTime(0)
+
+    // Start elapsed time counter
+    const startTime = Date.now()
+    let timeInterval = setInterval(() => {
+      setElapsedTime(Math.floor((Date.now() - startTime) / 1000))
+    }, 1000)
 
     try {
       let response
@@ -28,6 +36,7 @@ function TranscriptionPanel({ user, onTranscriptionComplete }) {
       if (inputType === 'file') {
         if (!selectedFile) {
           setError('Please select a file')
+          clearInterval(timeInterval)
           setProcessing(false)
           return
         }
@@ -41,11 +50,18 @@ function TranscriptionPanel({ user, onTranscriptionComplete }) {
         formData.append('paragraph_format', 'true')
 
         response = await axios.post(`${API_URL}/api/transcribe/file`, formData, {
-          headers: { 'Content-Type': 'multipart/form-data' }
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 600000, // 10 minutes timeout for long transcriptions
+          onUploadProgress: (progressEvent) => {
+            // File upload progress (if needed)
+            const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total)
+            console.log(`Upload progress: ${percentCompleted}%`)
+          }
         })
       } else {
         if (!url.trim()) {
           setError('Please enter a URL')
+          clearInterval(timeInterval)
           setProcessing(false)
           return
         }
@@ -58,7 +74,9 @@ function TranscriptionPanel({ user, onTranscriptionComplete }) {
         formData.append('enable_validation', 'true')
         formData.append('paragraph_format', 'true')
 
-        response = await axios.post(`${API_URL}/api/transcribe/url`, formData)
+        response = await axios.post(`${API_URL}/api/transcribe/url`, formData, {
+          timeout: 600000 // 10 minutes timeout for long transcriptions
+        })
       }
 
       setResult(response.data)
@@ -66,9 +84,20 @@ function TranscriptionPanel({ user, onTranscriptionComplete }) {
         onTranscriptionComplete(response.data)
       }
     } catch (err) {
-      setError(err.response?.data?.detail || 'Transcription failed')
+      // Handle timeout and network errors
+      if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
+        setError('Transcription is taking longer than expected. The process may still be running on the server. Please check your transcripts list or try again.')
+      } else if (err.response?.status === 500) {
+        setError(err.response?.data?.detail || 'Server error during transcription. Please try again.')
+      } else if (err.response?.status === 413) {
+        setError('File is too large. Please use a smaller file or compress it.')
+      } else {
+        setError(err.response?.data?.detail || 'Transcription failed. Please try again.')
+      }
     } finally {
+      clearInterval(timeInterval)
       setProcessing(false)
+      setElapsedTime(0)
     }
   }
 
@@ -139,8 +168,26 @@ function TranscriptionPanel({ user, onTranscriptionComplete }) {
 
         {error && <div className="error">{error}</div>}
 
+        {processing && (
+          <div className="processing-status">
+            <div className="status-message">
+              Processing... {elapsedTime > 0 && `(${Math.floor(elapsedTime / 60)}m ${elapsedTime % 60}s)`}
+            </div>
+            <div className="status-note">
+              Large files may take several minutes. Please keep this page open.
+            </div>
+          </div>
+        )}
+
         <button type="submit" disabled={processing} className="submit-btn">
-          {processing ? 'Transcribing...' : 'Start Transcription'}
+          {processing ? (
+            <span className="processing-indicator">
+              <span className="spinner"></span>
+              Transcribing...
+            </span>
+          ) : (
+            'Start Transcription'
+          )}
         </button>
       </form>
 

@@ -1,0 +1,155 @@
+.export-button-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.export-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: white;
+  border: 2px solid #ddd;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: 'Helvetica', Arial, sans-serif;
+  transition: all 0.2s;
+  min-width: 120px;
+  justify-content: center;
+}
+
+.export-btn:hover:not(:disabled) {
+  border-color: #285d93;
+  background: #f0f7ff;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.export-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.export-btn.subtitle {
+  border-left: 4px solid #285d93;
+}
+
+.export-btn.document {
+  border-left: 4px solid #EC7625;
+}
+
+.export-btn.audio {
+  border-left: 4px solid #4CAF50;
+}
+
+.export-btn.exporting {
+  background: #e8f4f8;
+  border-color: #285d93;
+}
+
+.export-btn.success {
+  background: #e8f5e9;
+  border-color: #4CAF50;
+}
+
+.export-icon {
+  font-size: 18px;
+}
+
+.export-label {
+  flex: 1;
+  text-align: left;
+}
+
+.export-spinner {
+  font-size: 14px;
+  animation: spin 1s linear infinite;
+}
+
+.export-check {
+  color: #4CAF50;
+  font-size: 16px;
+  font-weight: bold;
+}
+
+.export-arrow {
+  font-size: 10px;
+  color: #666;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.format-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  z-index: 1000;
+  min-width: 150px;
+  overflow: hidden;
+}
+
+.format-option {
+  display: block;
+  width: 100%;
+  padding: 10px 16px;
+  background: white;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  font-size: 14px;
+  font-family: 'Helvetica', Arial, sans-serif;
+  transition: background 0.2s;
+}
+
+.format-option:hover {
+  background: #f0f7ff;
+}
+
+.format-option:not(:last-child) {
+  border-bottom: 1px solid #eee;
+}
+
+.export-error {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  padding: 8px 12px;
+  background: #ffebee;
+  color: #c62828;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  z-index: 1001;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.export-actions {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #eee;
+}
+
+.export-actions h5 {
+  margin: 0 0 1rem 0;
+  color: #333;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.export-buttons {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}

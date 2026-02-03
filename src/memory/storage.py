@@ -13,6 +13,7 @@ from src.memory.models import (
     Transcript, Translation, Note, Tag, TranscriptTag, NoteTag, ExportFile
 )
 from src.core.config import Config
+from src.core.config import Config
 
 
 class StorageService:
@@ -194,6 +195,51 @@ class StorageService:
         except Exception as e:
             db.rollback()
             raise Exception(f"Failed to save translation: {str(e)}")
+        finally:
+            db.close()
+    
+    def get_translations(
+        self,
+        user_id: int,
+        transcript_id: int,
+        target_language: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get translations for a transcript (user-isolated)
+        
+        Args:
+            user_id: User ID
+            transcript_id: Transcript ID
+            target_language: Optional target language filter
+            
+        Returns:
+            List of translation dictionaries
+        """
+        db: Session = self.SessionLocal()
+        try:
+            query = db.query(Translation).filter(
+                and_(Translation.transcript_id == transcript_id, Translation.user_id == user_id)
+            )
+            
+            if target_language:
+                query = query.filter(Translation.target_language == target_language)
+            
+            translations = query.order_by(Translation.created_at.desc()).all()
+            
+            return [
+                {
+                    'id': t.id,
+                    'transcript_id': t.transcript_id,
+                    'source_language': t.source_language,
+                    'target_language': t.target_language,
+                    'translated_text': t.translated_text,
+                    'translated_paragraphs': t.translated_paragraphs,
+                    'translated_segments': t.translated_segments,
+                    'provider': t.provider,
+                    'created_at': t.created_at.isoformat() if t.created_at else None
+                }
+                for t in translations
+            ]
         finally:
             db.close()
     
@@ -505,5 +551,220 @@ class StorageService:
                 }
                 for exp in exports
             ]
+        finally:
+            db.close()
+    
+    def delete_transcript(
+        self,
+        user_id: int,
+        transcript_id: int
+    ) -> bool:
+        """
+        Delete a transcript and all related data (translations, notes, tags)
+        
+        Args:
+            user_id: User ID
+            transcript_id: Transcript ID to delete
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        db: Session = self.SessionLocal()
+        try:
+            # Get transcript and verify ownership
+            transcript = db.query(Transcript).filter(
+                and_(Transcript.id == transcript_id, Transcript.user_id == user_id)
+            ).first()
+            
+            if not transcript:
+                return False
+            
+            # Delete transcript (cascade will handle translations, notes, tags)
+            db.delete(transcript)
+            db.commit()
+            return True
+        except Exception as e:
+            db.rollback()
+            print(f"Error deleting transcript: {e}")
+            return False
+        finally:
+            db.close()
+    
+    def delete_export_file(
+        self,
+        user_id: int,
+        export_id: int
+    ) -> bool:
+        """
+        Delete an export file record and optionally the file itself
+        
+        Args:
+            user_id: User ID
+            export_id: Export file ID to delete
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        import os
+        
+        db: Session = self.SessionLocal()
+        try:
+            # Get export and verify ownership
+            export_file = db.query(ExportFile).filter(
+                and_(ExportFile.id == export_id, ExportFile.user_id == user_id)
+            ).first()
+            
+            if not export_file:
+                return False
+            
+            # Delete the physical file if it exists
+            file_path = Config.EXPORTS_DIR / export_file.file_path
+            if file_path.exists() and file_path.is_file():
+                try:
+                    os.remove(file_path)
+                except Exception as e:
+                    print(f"Warning: Failed to delete file {file_path}: {e}")
+            
+            # Delete database record
+            db.delete(export_file)
+            db.commit()
+            return True
+        except Exception as e:
+            db.rollback()
+            print(f"Error deleting export file: {e}")
+            return False
+        finally:
+            db.close()
+    
+    def delete_export_file_by_path(
+        self,
+        user_id: int,
+        file_path: str
+    ) -> bool:
+        """
+        Delete an export file by path (for files not in database)
+        
+        Args:
+            user_id: User ID
+            file_path: Relative file path (e.g., 'subtitles/file.srt')
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        import os
+        
+        try:
+            # Security: ensure path is within exports directory
+            full_path = Config.EXPORTS_DIR / file_path
+            try:
+                full_path.resolve().relative_to(Config.EXPORTS_DIR.resolve())
+            except ValueError:
+                return False  # Invalid path
+            
+            if full_path.exists() and full_path.is_file():
+                os.remove(full_path)
+                return True
+            return False
+        except Exception as e:
+            print(f"Error deleting export file by path: {e}")
+            return False
+    
+    def delete_note(self, user_id: int, note_id: int) -> bool:
+        """
+        Delete a note
+        
+        Args:
+            user_id: User ID
+            note_id: Note ID to delete
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        db: Session = self.SessionLocal()
+        try:
+            # Get note and verify ownership
+            note = db.query(Note).filter(
+                and_(Note.id == note_id, Note.user_id == user_id)
+            ).first()
+            
+            if not note:
+                return False
+            
+            # Delete note (cascade will handle NoteTag relationships)
+            db.delete(note)
+            db.commit()
+            return True
+        except Exception as e:
+            db.rollback()
+            print(f"Error deleting note: {e}")
+            return False
+        finally:
+            db.close()
+    
+    def delete_tag(self, user_id: int, tag_id: int) -> bool:
+        """
+        Delete a tag (will cascade delete TranscriptTag and NoteTag relationships)
+        
+        Args:
+            user_id: User ID
+            tag_id: Tag ID to delete
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        db: Session = self.SessionLocal()
+        try:
+            # Get tag and verify ownership
+            tag = db.query(Tag).filter(
+                and_(Tag.id == tag_id, Tag.user_id == user_id)
+            ).first()
+            
+            if not tag:
+                return False
+            
+            # Delete tag (cascade will handle TranscriptTag and NoteTag relationships)
+            db.delete(tag)
+            db.commit()
+            return True
+        except Exception as e:
+            db.rollback()
+            print(f"Error deleting tag: {e}")
+            return False
+        finally:
+            db.close()
+    
+    def remove_tag_from_transcript(self, user_id: int, transcript_id: int, tag_id: int) -> bool:
+        """
+        Remove a tag from a transcript (without deleting the tag itself)
+        
+        Args:
+            user_id: User ID
+            transcript_id: Transcript ID
+            tag_id: Tag ID to remove
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        db: Session = self.SessionLocal()
+        try:
+            # Find and delete the TranscriptTag relationship
+            transcript_tag = db.query(TranscriptTag).filter(
+                and_(
+                    TranscriptTag.transcript_id == transcript_id,
+                    TranscriptTag.tag_id == tag_id,
+                    TranscriptTag.user_id == user_id
+                )
+            ).first()
+            
+            if not transcript_tag:
+                return False
+            
+            db.delete(transcript_tag)
+            db.commit()
+            return True
+        except Exception as e:
+            db.rollback()
+            print(f"Error removing tag from transcript: {e}")
+            return False
         finally:
             db.close()

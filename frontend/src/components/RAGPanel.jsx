@@ -12,6 +12,7 @@ function RAGPanel({ user }) {
   const [error, setError] = useState('')
   const [indexing, setIndexing] = useState(false)
   const [stats, setStats] = useState(null)
+  const [deletingEmbeddings, setDeletingEmbeddings] = useState(false)
 
   useEffect(() => {
     loadStats()
@@ -72,6 +73,30 @@ function RAGPanel({ user }) {
     }
   }
 
+  const handleDeleteAllEmbeddings = async () => {
+    if (!window.confirm(
+      '⚠️ WARNING: This will delete ALL embeddings for your account!\n\n' +
+      'This means you will need to re-index all transcripts to use question-answering again.\n\n' +
+      'Are you sure you want to continue?'
+    )) {
+      return
+    }
+
+    setDeletingEmbeddings(true)
+    setError('')
+    try {
+      await axios.delete(`${API_URL}/api/rag/embeddings/all`, {
+        params: { user_id: user.user_id }
+      })
+      alert('✅ All embeddings deleted successfully. Re-index transcripts to use question-answering again.')
+      loadStats()
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to delete embeddings')
+    } finally {
+      setDeletingEmbeddings(false)
+    }
+  }
+
   const handleQuery = async (e) => {
     e.preventDefault()
     if (!question.trim()) {
@@ -114,7 +139,10 @@ function RAGPanel({ user }) {
   return (
     <div className="rag-panel">
       <div className="rag-header">
-        <h2>🤖 Ask Questions</h2>
+        <div>
+          <h2>🤖 Ask Questions</h2>
+          <div className="list-subtitle">Query your transcripts with AI-powered search</div>
+        </div>
         <div className="rag-actions">
           <button
             onClick={handleIndexAll}
@@ -123,6 +151,16 @@ function RAGPanel({ user }) {
           >
             {indexing ? 'Indexing...' : '📚 Index All Transcripts'}
           </button>
+          {stats && stats.num_vectors > 0 && (
+            <button
+              onClick={handleDeleteAllEmbeddings}
+              disabled={deletingEmbeddings}
+              className="delete-embeddings-btn"
+              title="Delete all embeddings"
+            >
+              {deletingEmbeddings ? 'Deleting...' : '🗑️ Delete All Embeddings'}
+            </button>
+          )}
           {stats && (
             <span className="stats-badge" title={getStatsDisplay()}>
               {getStatsDisplay() || `${stats.num_vectors || 0} vectors indexed`}

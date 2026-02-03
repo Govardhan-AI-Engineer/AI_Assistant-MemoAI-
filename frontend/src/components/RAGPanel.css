@@ -13,9 +13,17 @@
 }
 
 .rag-header h2 {
-  margin: 0;
+  margin: 0 0 4px 0;
   color: #333;
-  font-size: 1.5rem;
+  font-size: 18px;
+  font-weight: 600;
+  font-family: 'Helvetica', Arial, sans-serif;
+}
+
+.list-subtitle {
+  font-size: 12px;
+  color: #666;
+  font-family: 'Helvetica', Arial, sans-serif;
 }
 
 .rag-actions {
@@ -24,9 +32,10 @@
   gap: 1rem;
 }
 
-.index-btn {
+.index-btn,
+.delete-embeddings-btn {
   padding: 0.5rem 1rem;
-  background: #28a745;
+  background: #285d93;
   color: white;
   border: none;
   border-radius: 4px;
@@ -34,6 +43,25 @@
   font-size: 0.9rem;
   font-weight: 500;
   transition: all 0.2s;
+  font-family: 'Helvetica', Arial, sans-serif;
+}
+
+.index-btn:hover:not(:disabled) {
+  background: #1f4a7a;
+}
+
+.delete-embeddings-btn {
+  background: #EC7625;
+}
+
+.delete-embeddings-btn:hover:not(:disabled) {
+  background: #d6681f;
+  transform: translateY(-1px);
+}
+
+.delete-embeddings-btn:disabled {
+  background: #6c757d;
+  cursor: not-allowed;
 }
 
 .index-btn:hover:not(:disabled) {
@@ -47,17 +75,18 @@
 }
 
 .stats-badge {
-  background: #007bff;
+  background: #285d93;
   color: white;
   padding: 0.3rem 0.8rem;
   border-radius: 12px;
   font-size: 0.85rem;
   font-weight: 500;
+  font-family: 'Helvetica', Arial, sans-serif;
 }
 
 .rag-info {
   background: #e7f3ff;
-  border-left: 4px solid #007bff;
+  border-left: 4px solid #285d93;
   padding: 1rem;
   border-radius: 4px;
   margin-bottom: 1.5rem;
@@ -65,8 +94,9 @@
 
 .rag-info p {
   margin: 0;
-  color: #004085;
+  color: #1f4a7a;
   font-size: 0.95rem;
+  font-family: 'Helvetica', Arial, sans-serif;
 }
 
 .rag-form {
@@ -97,8 +127,8 @@
 
 .question-input:focus {
   outline: none;
-  border-color: #007bff;
-  box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
+  border-color: #285d93;
+  box-shadow: 0 0 0 3px rgba(40, 93, 147, 0.1);
 }
 
 .question-input:disabled {
@@ -108,7 +138,7 @@
 
 .submit-btn {
   padding: 0.75rem 2rem;
-  background: #007bff;
+  background: #285d93;
   color: white;
   border: none;
   border-radius: 4px;
@@ -116,10 +146,11 @@
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
+  font-family: 'Helvetica', Arial, sans-serif;
 }
 
 .submit-btn:hover:not(:disabled) {
-  background: #0056b3;
+  background: #1f4a7a;
   transform: translateY(-1px);
 }
 
@@ -144,7 +175,7 @@
   margin: 0 0 1rem 0;
   color: #333;
   font-size: 1.2rem;
-  border-bottom: 2px solid #007bff;
+  border-bottom: 2px solid #285d93;
   padding-bottom: 0.5rem;
 }
 
@@ -170,7 +201,7 @@
   margin: 0 0 1rem 0;
   color: #333;
   font-size: 1.2rem;
-  border-bottom: 2px solid #28a745;
+  border-bottom: 2px solid #EC7625;
   padding-bottom: 0.5rem;
 }
 
@@ -184,7 +215,7 @@
   background: #f8f9fa;
   padding: 1rem;
   border-radius: 6px;
-  border-left: 4px solid #28a745;
+  border-left: 4px solid #EC7625;
 }
 
 .citation-header {
@@ -195,7 +226,7 @@
 }
 
 .citation-number {
-  background: #007bff;
+  background: #285d93;
   color: white;
   width: 24px;
   height: 24px;
@@ -205,6 +236,7 @@
   justify-content: center;
   font-weight: 600;
   font-size: 0.85rem;
+  font-family: 'Helvetica', Arial, sans-serif;
 }
 
 .citation-type {
@@ -351,7 +383,7 @@
 }
 
 .source-badge.context {
-  background: #28a745;
+  background: #EC7625;
   color: white;
 }
 

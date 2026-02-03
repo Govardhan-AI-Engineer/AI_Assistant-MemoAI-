@@ -1,8 +1,6 @@
 .transcription-panel {
-  background: white;
-  padding: 20px;
-  border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  background: transparent;
+  padding: 0;
 }
 
 .transcription-panel h2 {
@@ -28,9 +26,9 @@
 }
 
 .input-type-toggle button.active {
-  background: #667eea;
+  background: #285d93;
   color: white;
-  border-color: #667eea;
+  border-color: #285d93;
 }
 
 .form-group {
@@ -56,7 +54,7 @@
 .form-group input:focus,
 .form-group select:focus {
   outline: none;
-  border-color: #667eea;
+  border-color: #285d93;
 }
 
 .file-info {
@@ -76,23 +74,66 @@
 .submit-btn {
   width: 100%;
   padding: 12px;
-  background: #667eea;
+  background: #285d93;
   color: white;
   border: none;
-  border-radius: 5px;
+  border-radius: 4px;
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;
   transition: background 0.3s;
+  font-family: 'Helvetica', Arial, sans-serif;
 }
 
 .submit-btn:hover:not(:disabled) {
-  background: #5568d3;
+  background: #1f4a7a;
 }
 
 .submit-btn:disabled {
-  opacity: 0.6;
+  opacity: 0.8;
   cursor: not-allowed;
+}
+
+.processing-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.processing-status {
+  margin-bottom: 15px;
+  padding: 12px;
+  background: #e8f4f8;
+  border-left: 4px solid #285d93;
+  border-radius: 4px;
+}
+
+.status-message {
+  font-weight: 600;
+  color: #285d93;
+  margin-bottom: 5px;
+}
+
+.status-note {
+  font-size: 13px;
+  color: #666;
+  font-style: italic;
 }
 
 .result {

@@ -77,8 +77,10 @@ class AudioPreprocessor:
             filter_chain = ",".join(filters) if filters else None
             
             # Build FFmpeg command
+            # Optimized with threading for faster processing (no quality loss)
             cmd = [
                 'ffmpeg',
+                '-threads', '0',  # Use all CPU cores for faster processing
                 '-i', str(input_path),
                 '-vn',  # No video
             ]
@@ -128,8 +130,10 @@ class AudioPreprocessor:
     @classmethod
     def _basic_preprocess(cls, input_path: Path, output_path: Path) -> Tuple[Path, Dict]:
         """Fallback: Basic audio conversion without advanced filters"""
+        # Optimized with threading for faster processing (no quality loss)
         cmd = [
             'ffmpeg',
+            '-threads', '0',  # Use all CPU cores for faster processing
             '-i', str(input_path),
             '-vn',
             '-acodec', 'pcm_s16le',

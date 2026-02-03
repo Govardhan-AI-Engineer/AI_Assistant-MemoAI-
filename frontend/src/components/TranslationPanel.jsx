@@ -1,10 +1,11 @@
 import React, { useState } from 'react'
 import axios from 'axios'
+import ExportButton from './ExportButton'
 import './TranslationPanel.css'
 
 const API_URL = 'http://localhost:8000'
 
-function TranslationPanel({ user, transcript }) {
+function TranslationPanel({ user, transcript, onLanguageChange }) {
   const [targetLanguage, setTargetLanguage] = useState('en')
   const [provider, setProvider] = useState('auto')
   const [granularity, setGranularity] = useState('whole_text')
@@ -53,7 +54,12 @@ function TranslationPanel({ user, transcript }) {
             <label>Target Language</label>
             <select
               value={targetLanguage}
-              onChange={(e) => setTargetLanguage(e.target.value)}
+              onChange={(e) => {
+                setTargetLanguage(e.target.value)
+                if (onLanguageChange) {
+                  onLanguageChange(e.target.value)
+                }
+              }}
               disabled={translating}
             >
               <option value="en">English</option>
@@ -124,6 +130,38 @@ function TranslationPanel({ user, transcript }) {
             <span>Provider: {translation.provider || 'unknown'}</span>
             <span>Language: {translation.target_language}</span>
           </div>
+          {transcript && (
+            <div className="export-actions">
+              <h4>Export Options</h4>
+              <div className="export-buttons">
+                <ExportButton
+                  user={user}
+                  transcriptId={transcript.transcript_id || transcript.id}
+                  type="subtitle"
+                  icon="📄"
+                  label="Subtitles"
+                  formats={['srt', 'vtt', 'both']}
+                />
+                <ExportButton
+                  user={user}
+                  transcriptId={transcript.transcript_id || transcript.id}
+                  type="document"
+                  icon="📝"
+                  label="Documents"
+                  formats={['md', 'txt', 'json']}
+                />
+                <ExportButton
+                  user={user}
+                  transcriptId={transcript.transcript_id || transcript.id}
+                  type="audio"
+                  icon="🔊"
+                  label="Audio"
+                  formats={['mp3', 'wav']}
+                  targetLanguage={translation?.target_language || targetLanguage}
+                />
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

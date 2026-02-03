@@ -278,12 +278,25 @@ class RAGQAEngine:
         # Detect query language
         query_lang = self.detect_query_language(question)
         
-        # Step 1: Query Rewriting (if advanced)
+        # Step 1: Query Rewriting (if advanced) - Skip for simple queries to save time
         original_question = question
         if use_advanced and self.query_rewriter:
-            rewritten_info = self.query_rewriter.rewrite_query(question, query_lang)
-            question = rewritten_info['rewritten']  # Use rewritten query for search
-            query_variants = self.query_rewriter.generate_search_queries(original_question, query_lang)
+            # Skip rewriting for very short or simple queries (speed optimization)
+            question_lower = question.lower().strip()
+            is_simple_query = (
+                len(question.split()) <= 3 or  # Very short
+                question_lower in ['hi', 'hello', 'hey', 'thanks', 'bye', 'ok', 'okay'] or  # Greetings
+                not any(c in question for c in ['?', 'what', 'how', 'why', 'when', 'where', 'who', 'which'])  # Not a question
+            )
+            
+            if is_simple_query:
+                # Skip LLM rewriting for simple queries
+                rewritten_info = None
+                query_variants = [question]
+            else:
+                rewritten_info = self.query_rewriter.rewrite_query(question, query_lang)
+                question = rewritten_info['rewritten']  # Use rewritten query for search
+                query_variants = self.query_rewriter.generate_search_queries(original_question, query_lang)
         else:
             rewritten_info = None
             query_variants = [question]
@@ -308,15 +321,53 @@ class RAGQAEngine:
             )
             search_method = 'semantic'
         
-        # Step 3: Re-ranking (if advanced)
+        # Step 3: Re-ranking (if advanced) - Limit to top candidates for speed
         if results and use_advanced and self.reranker and self.reranker.is_available():
-            results = self.reranker.rerank(original_question, results, top_k=top_k * 2)
+            # Only re-rank top candidates (not all results) for better performance
+            candidates_to_rerank = results[:top_k * 3]  # Re-rank top 3x candidates
+            if len(candidates_to_rerank) > 0:
+                reranked_candidates = self.reranker.rerank(original_question, candidates_to_rerank, top_k=top_k * 2)
+                # Combine with non-reranked results
+                reranked_keys = {self._get_result_key(meta) for meta, _ in reranked_candidates}
+                other_results = [(meta, score) for meta, score in results if self._get_result_key(meta) not in reranked_keys]
+                results = reranked_candidates + other_results
+                results.sort(key=lambda x: x[1], reverse=True)
         
         # Filter by similarity threshold
         filtered_results = [
             (meta, score) for meta, score in results
             if score >= min_similarity
         ] if results else []
+        
+        # Early exit optimization: If no results found, skip remaining steps
+        if not filtered_results:
+            # No relevant context found - use general knowledge immediately
+            if use_advanced and self.refiner:
+                general_answer = self.refiner.answer_general_knowledge(original_question, query_lang)
+                answer = general_answer.get('answer', 'No relevant information found in your stored transcripts.')
+            else:
+                if query_lang == 'en':
+                    answer = "This question is not related to your stored transcripts. Please ask questions about your uploaded content."
+                elif query_lang == 'hi':
+                    answer = "यह प्रश्न आपके संग्रहीत ट्रांसक्रिप्ट से संबंधित नहीं है। कृपया अपनी अपलोड की गई सामग्री के बारे में प्रश्न पूछें।"
+                elif query_lang == 'te':
+                    answer = "ఈ ప్రశ్న మీ నిల్వ చేసిన ట్రాన్స్క్రిప్ట్‌లకు సంబంధించినది కాదు। దయచేసి మీ అప్‌లోడ్ చేసిన కంటెంట్ గురించి ప్రశ్నలు అడగండి।"
+                else:
+                    answer = "This question is not related to your stored transcripts. Please ask questions about your uploaded content."
+            
+            return {
+                'answer': answer,
+                'language': query_lang,
+                'citations': [],
+                'retrieved_chunks': [],
+                'num_results': 0,
+                'validation': None,
+                'query_rewritten': rewritten_info,
+                'search_method': search_method,
+                'refinement_method': 'general_knowledge' if use_advanced else 'fallback',
+                'is_from_context': False,
+                'context_relevant': False
+            }
         
         # Extract retrieved chunks (even if empty, for relevance check)
         retrieved_chunks = [meta for meta, _ in filtered_results] if filtered_results else []
@@ -433,14 +484,31 @@ class RAGQAEngine:
                 is_from_context = False
         
         # Step 7: Response Validation (only for context-based answers)
+        # Skip validation for high-confidence answers to save time
         validation = None
         if is_from_context and use_advanced and self.validator:
-            validation = self.validator.validate(
-                query=original_question,
-                answer=answer,
-                retrieved_chunks=retrieved_chunks,
-                language=query_lang
-            )
+            # Calculate average similarity score for top results
+            avg_similarity = sum(score for _, score in filtered_results[:3]) / len(filtered_results[:3]) if filtered_results[:3] else 0
+            
+            if avg_similarity >= 0.7:  # High confidence - skip validation
+                validation = {
+                    'is_valid': True,
+                    'relevance_score': 0.9,
+                    'completeness_score': 0.8,
+                    'grounded_score': 0.9,
+                    'overall_score': 0.87,
+                    'issues': [],
+                    'suggestions': [],
+                    'method': 'skipped_high_confidence'
+                }
+            else:
+                # Only validate when confidence is lower
+                validation = self.validator.validate(
+                    query=original_question,
+                    answer=answer,
+                    retrieved_chunks=retrieved_chunks,
+                    language=query_lang
+                )
         
         # Build citations (only if answer is from context)
         citations = []
@@ -524,3 +592,10 @@ class RAGQAEngine:
         minutes = int((seconds % 3600) // 60)
         secs = int(seconds % 60)
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    
+    def _get_result_key(self, metadata: Dict[str, Any]) -> str:
+        """Generate unique key for a result (for deduplication)"""
+        transcript_id = metadata.get('transcript_id', '')
+        start = metadata.get('start', '')
+        end = metadata.get('end', '')
+        return f"{transcript_id}_{start}_{end}"

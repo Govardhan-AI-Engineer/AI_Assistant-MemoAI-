@@ -3,7 +3,7 @@
   justify-content: center;
   align-items: center;
   min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: linear-gradient(135deg, #285d93 0%, #EC7625 100%);
 }
 
 .login-box {
@@ -46,9 +46,9 @@
 }
 
 .mode-toggle button.active {
-  background: #667eea;
+  background: #285d93;
   color: white;
-  border-color: #667eea;
+  border-color: #285d93;
 }
 
 .form-group {
@@ -73,7 +73,7 @@
 
 .form-group input:focus {
   outline: none;
-  border-color: #667eea;
+  border-color: #285d93;
 }
 
 .error {
@@ -88,18 +88,19 @@
 .submit-btn {
   width: 100%;
   padding: 12px;
-  background: #667eea;
+  background: #285d93;
   color: white;
   border: none;
-  border-radius: 5px;
+  border-radius: 4px;
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;
   transition: background 0.3s;
+  font-family: 'Helvetica', Arial, sans-serif;
 }
 
 .submit-btn:hover:not(:disabled) {
-  background: #5568d3;
+  background: #1f4a7a;
 }
 
 .submit-btn:disabled {

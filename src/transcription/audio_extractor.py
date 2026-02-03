@@ -64,8 +64,10 @@ class AudioExtractor:
         
         try:
             # Use FFmpeg to extract/convert audio to WAV
+            # Optimized with threading for faster processing (no quality loss)
             cmd = [
                 'ffmpeg',
+                '-threads', '0',  # Use all CPU cores for faster processing
                 '-i', str(input_path),
                 '-vn',  # No video
                 '-acodec', 'pcm_s16le',  # PCM 16-bit

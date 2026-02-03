@@ -346,7 +346,68 @@ async def get_transcripts(
         offset=offset,
         language=language
     )
+    
+    # Add tags to each transcript
+    if search_service:
+        from src.memory.models import TranscriptTag, Tag
+        from sqlalchemy.orm import Session
+        from sqlalchemy import and_
+        
+        db: Session = storage_service.SessionLocal()
+        try:
+            for transcript in transcripts:
+                transcript_id = transcript.get('id')
+                if transcript_id:
+                    # Get tags for this transcript
+                    transcript_tags_query = db.query(Tag).join(
+                        TranscriptTag, Tag.id == TranscriptTag.tag_id
+                    ).filter(
+                        and_(
+                            TranscriptTag.transcript_id == transcript_id,
+                            TranscriptTag.user_id == user_id
+                        )
+                    ).all()
+                    
+                    transcript['tags'] = [
+                        {
+                            'id': tag.id,
+                            'name': tag.name,
+                            'color': tag.color,
+                            'created_at': tag.created_at.isoformat() if tag.created_at else None
+                        }
+                        for tag in transcript_tags_query
+                    ]
+                else:
+                    transcript['tags'] = []
+        finally:
+            db.close()
+    else:
+        # If search service not available, add empty tags array
+        for transcript in transcripts:
+            transcript['tags'] = []
+    
     return {"transcripts": transcripts, "count": len(transcripts)}
+
+
+@app.delete("/api/transcripts/{transcript_id}")
+async def delete_transcript(transcript_id: int, user_id: int):
+    """Delete a transcript and all related data"""
+    if not storage_service:
+        raise HTTPException(status_code=500, detail="Storage service not available")
+    
+    # Also delete embeddings for this transcript
+    try:
+        from src.rag.vectorstore import FAISSVectorStore
+        vectorstore = FAISSVectorStore(user_id=user_id)
+        vectorstore.delete_by_transcript(transcript_id)
+    except Exception as e:
+        print(f"Warning: Failed to delete embeddings: {e}")
+    
+    success = storage_service.delete_transcript(user_id=user_id, transcript_id=transcript_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Transcript not found or deletion failed")
+    
+    return {"success": True, "message": "Transcript deleted successfully"}
 
 
 @app.get("/api/transcripts/{document_id}")
@@ -390,9 +451,15 @@ async def search_transcripts(
 async def generate_note(
     transcript_id: int = Form(...),
     user_id: int = Form(...),
-    note_type: str = Form("summary")
+    note_type: str = Form("summary"),
+    target_language: Optional[str] = Form(None),  # For display only - notes are canonical
+    force_regenerate: bool = Form(False)  # Allow explicit regeneration
 ):
-    """Generate AI note for transcript"""
+    """
+    Generate canonical AI note for transcript
+    CANONICAL ARCHITECTURE: Notes are generated ONCE in original transcript language
+    and translated for display. This ensures consistency and completeness.
+    """
     try:
         if not note_service:
             raise HTTPException(status_code=500, detail="Note service not available")
@@ -408,23 +475,50 @@ async def generate_note(
         if not transcript:
             raise HTTPException(status_code=404, detail="Transcript not found")
         
-        # Generate note
+        # CANONICAL: Always use original transcript text and language
+        # Notes are generated once in the original language, then translated for display
+        transcript_text = transcript.get('text', '')
+        original_language = transcript.get('language', 'auto')
+        
+        # Generate canonical note (in original transcript language)
+        # This ensures notes are complete, consistent, and deterministic
         if note_type == "summary":
             note = note_service.generate_summary(
                 user_id=user_id,
                 transcript_id=transcript_id,
-                transcript_text=transcript.get('text', ''),
-                language=transcript.get('language', 'auto')
+                transcript_text=transcript_text,
+                language=original_language,  # Always use original language for canonical note
+                force_regenerate=force_regenerate
             )
         elif note_type == "key_points":
             note = note_service.generate_key_points(
                 user_id=user_id,
                 transcript_id=transcript_id,
-                transcript_text=transcript.get('text', ''),
-                language=transcript.get('language', 'auto')
+                transcript_text=transcript_text,
+                language=original_language,  # Always use original language for canonical note
+                force_regenerate=force_regenerate
             )
         else:
             raise HTTPException(status_code=400, detail="Invalid note_type")
+        
+        # If target_language is specified and different from original, translate the note
+        # This ensures notes are displayed in user's preferred language while maintaining canonical source
+        if target_language and target_language != 'auto' and target_language != original_language:
+            try:
+                # Translate the canonical note content for display
+                from src.translation import TranslationIntegration
+                if translation_integration:
+                    translated_content = translation_integration.translate_text(
+                        text=note.get('content', ''),
+                        source_language=original_language,
+                        target_language=target_language
+                    )
+                    # Return note with translated content for display
+                    note['translated_content'] = translated_content
+                    note['display_language'] = target_language
+            except Exception as e:
+                print(f"Warning: Could not translate note: {e}")
+                # Return canonical note even if translation fails
         
         return note
         
@@ -446,6 +540,19 @@ async def get_notes(user_id: int, transcript_id: Optional[int] = None):
         notes = storage_service.get_user_notes(user_id=user_id)
     
     return {"notes": notes, "count": len(notes)}
+
+
+@app.delete("/api/notes/{note_id}")
+async def delete_note(note_id: int, user_id: int):
+    """Delete a note"""
+    if not storage_service:
+        raise HTTPException(status_code=500, detail="Storage service not available")
+    
+    success = storage_service.delete_note(user_id=user_id, note_id=note_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Note not found or deletion failed")
+    
+    return {"success": True, "message": "Note deleted successfully"}
 
 
 # Tags endpoints
@@ -471,6 +578,128 @@ async def create_tag(
     
     tag = search_service.create_tag(user_id=user_id, name=name, color=color)
     return tag
+
+
+@app.post("/api/tags/transcript")
+async def add_tag_to_transcript(
+    user_id: int = Form(...),
+    transcript_id: int = Form(...),
+    tag_id: int = Form(...)
+):
+    """Add tag to transcript"""
+    if not search_service:
+        raise HTTPException(status_code=500, detail="Search service not available")
+    
+    success = search_service.add_tag_to_transcript(
+        user_id=user_id,
+        transcript_id=transcript_id,
+        tag_id=tag_id
+    )
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to add tag to transcript")
+    return {"success": True}
+
+
+@app.post("/api/tags/note")
+async def add_tag_to_note(
+    user_id: int = Form(...),
+    note_id: int = Form(...),
+    tag_id: int = Form(...)
+):
+    """Add tag to note"""
+    if not search_service:
+        raise HTTPException(status_code=500, detail="Search service not available")
+    
+    success = search_service.add_tag_to_note(
+        user_id=user_id,
+        note_id=note_id,
+        tag_id=tag_id
+    )
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to add tag to note")
+    return {"success": True}
+
+
+@app.delete("/api/tags/{tag_id}")
+async def delete_tag(tag_id: int, user_id: int):
+    """Delete a tag"""
+    if not storage_service:
+        raise HTTPException(status_code=500, detail="Storage service not available")
+    
+    success = storage_service.delete_tag(user_id=user_id, tag_id=tag_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Tag not found or deletion failed")
+    
+    return {"success": True, "message": "Tag deleted successfully"}
+
+
+@app.delete("/api/transcripts/{transcript_id}/tags/{tag_id}")
+async def remove_tag_from_transcript(transcript_id: int, tag_id: int, user_id: int):
+    """Remove a tag from a transcript"""
+    if not storage_service:
+        raise HTTPException(status_code=500, detail="Storage service not available")
+    
+    success = storage_service.remove_tag_from_transcript(
+        user_id=user_id,
+        transcript_id=transcript_id,
+        tag_id=tag_id
+    )
+    if not success:
+        raise HTTPException(status_code=404, detail="Tag not found on transcript or removal failed")
+    
+    return {"success": True, "message": "Tag removed from transcript successfully"}
+
+
+@app.get("/api/transcripts/{transcript_id}/tags")
+async def get_transcript_tags(transcript_id: int, user_id: int):
+    """Get tags for a transcript"""
+    if not storage_service or not search_service:
+        raise HTTPException(status_code=500, detail="Services not available")
+    
+    # Get transcript to verify ownership
+    transcripts = storage_service.get_user_transcripts(user_id=user_id, limit=1000)
+    transcript = None
+    for t in transcripts:
+        if t.get('id') == transcript_id:
+            transcript = t
+            break
+    
+    if not transcript:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    
+    # Get all user tags
+    all_tags = search_service.get_tags(user_id=user_id)
+    
+    # Get transcript's tags from database
+    from src.memory.models import TranscriptTag, Tag
+    from sqlalchemy.orm import Session
+    from sqlalchemy import and_
+    
+    db: Session = storage_service.SessionLocal()
+    try:
+        # Query TranscriptTag to get tags for this transcript
+        transcript_tags_query = db.query(Tag).join(
+            TranscriptTag, Tag.id == TranscriptTag.tag_id
+        ).filter(
+            and_(
+                TranscriptTag.transcript_id == transcript_id,
+                TranscriptTag.user_id == user_id
+            )
+        ).all()
+        
+        transcript_tags = [
+            {
+                'id': tag.id,
+                'name': tag.name,
+                'color': tag.color,
+                'created_at': tag.created_at.isoformat() if tag.created_at else None
+            }
+            for tag in transcript_tags_query
+        ]
+        
+        return {"tags": all_tags, "transcript_tags": transcript_tags}
+    finally:
+        db.close()
 
 
 # Export endpoints
@@ -511,40 +740,362 @@ async def export_subtitles(
             }
         }
         
-        # Get translation if needed
-        translated_text = None
-        translated_segments = None
-        if use_translated and target_language:
-            # Get translation from database
-            # (Would need to query translations table)
-            pass
+        # ALWAYS get all translations to include both original and translated in exports
+        # This ensures consistency: every export includes both languages
+        all_translations = storage_service.get_translations(
+            user_id=user_id,
+            transcript_id=transcript_id,
+            target_language=None  # Get all translations
+        ) if storage_service else []
+        
+        # If specific language requested, use it; otherwise use first available translation
+        translation = None
+        if target_language:
+            for t in all_translations:
+                if t.get('target_language') == target_language:
+                    translation = t
+                    break
+        
+        # If no specific translation found but translations exist, use first one
+        if not translation and all_translations:
+            translation = all_translations[0]
+        
+        translated_text = translation.get('translated_text') if translation else None
+        translated_segments = translation.get('translated_segments') if translation else None
+        translated_paragraphs = translation.get('translated_paragraphs') if translation else None
         
         # Generate subtitles
+        from src.core.config import Config
+        from pathlib import Path
+        
+        # Prepare source file path for naming
+        source_file = None
+        if transcript.get('source_file'):
+            source_file = Path(transcript.get('source_file'))
+        elif transcript.get('source_url'):
+            # Extract name from URL
+            import re
+            url_name = re.sub(r'[^\w\s-]', '', transcript.get('source_url', ''))
+            source_file = Path(url_name[:50])  # Limit length
+        
+        generated_files = []
         if format == "both":
             files = SubtitleGenerator.generate_both(
                 transcription_data=transcription_data,
+                source_file=source_file,
                 use_paragraphs=True,
                 translated_text=translated_text,
                 translated_segments=translated_segments
             )
-            return {"files": {k: str(v) for k, v in files.items()}}
+            generated_files = list(files.values())
         elif format == "srt":
             file = SubtitleGenerator.generate_srt(
                 transcription_data=transcription_data,
+                source_file=source_file,
                 use_paragraphs=True,
                 translated_text=translated_text,
                 translated_segments=translated_segments
             )
-            return {"file": str(file)}
+            generated_files = [file]
         else:  # vtt
             file = SubtitleGenerator.generate_vtt(
                 transcription_data=transcription_data,
+                source_file=source_file,
                 use_paragraphs=True,
                 translated_text=translated_text,
                 translated_segments=translated_segments
             )
-            return {"file": str(file)}
+            generated_files = [file]
+        
+        # Save to database
+        saved_exports = []
+        for file_path in generated_files:
+            file_path = Path(file_path)
+            # Get relative path from exports directory
+            try:
+                rel_path = file_path.relative_to(Config.EXPORTS_DIR)
+                rel_path_str = str(rel_path).replace('\\', '/')  # Normalize path separators
+            except ValueError:
+                # If file is not in exports dir, use filename only
+                rel_path_str = f"subtitles/{file_path.name}"
             
+            # Determine file format
+            ext = file_path.suffix.lower().lstrip('.')
+            file_format = ext if ext in ['srt', 'vtt'] else 'srt'
+            
+            # Save to database
+            if storage_service:
+                try:
+                    file_size = file_path.stat().st_size if file_path.exists() else None
+                    export_file = storage_service.save_export_file(
+                        user_id=user_id,
+                        file_path=rel_path_str,
+                        file_type='subtitle',
+                        file_format=file_format,
+                        transcript_id=transcript_id,
+                        language=target_language if use_translated else transcript.get('language', 'auto'),
+                        is_translated=use_translated,
+                        file_size=file_size
+                    )
+                    saved_exports.append(export_file)
+                except Exception as e:
+                    print(f"Warning: Failed to save export to database: {e}")
+        
+        if format == "both":
+            return {"files": {k: str(v) for k, v in files.items()}, "saved": saved_exports}
+        else:
+            return {"file": str(generated_files[0]), "saved": saved_exports[0] if saved_exports else None}
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/export/documents")
+async def export_documents(
+    transcript_id: int = Form(...),
+    user_id: int = Form(...),
+    format: str = Form("md"),  # "md", "txt", "json"
+    use_translated: bool = Form(False),
+    target_language: Optional[str] = Form(None)
+):
+    """Export transcript as document (Markdown, TXT, or JSON)"""
+    try:
+        from src.export import DocumentExporter
+        if not DocumentExporter:
+            raise HTTPException(status_code=500, detail="Document exporter not available")
+        
+        # Get transcript
+        transcripts = storage_service.get_user_transcripts(user_id=user_id, limit=1000)
+        transcript = None
+        for t in transcripts:
+            if t.get('id') == transcript_id:
+                transcript = t
+                break
+        
+        if not transcript:
+            raise HTTPException(status_code=404, detail="Transcript not found")
+        
+        # Convert to transcription data format
+        transcription_data = {
+            'text': transcript.get('text', ''),
+            'language': transcript.get('language', 'auto'),
+            'segments': transcript.get('segments', []),
+            'paragraphs': transcript.get('paragraphs', []),
+            'metadata': {
+                'source_file': transcript.get('source_file'),
+                'source_url': transcript.get('source_url')
+            }
+        }
+        
+        # ALWAYS get all translations to include both original and translated in exports
+        # This ensures consistency: every document export includes both languages
+        all_translations = storage_service.get_translations(
+            user_id=user_id,
+            transcript_id=transcript_id,
+            target_language=None  # Get all translations
+        ) if storage_service else []
+        
+        # If specific language requested, use it; otherwise use first available translation
+        translation = None
+        if target_language:
+            for t in all_translations:
+                if t.get('target_language') == target_language:
+                    translation = t
+                    break
+        
+        # If no specific translation found but translations exist, use first one
+        if not translation and all_translations:
+            translation = all_translations[0]
+        
+        translated_text = translation.get('translated_text') if translation else None
+        translated_paragraphs = translation.get('translated_paragraphs') if translation else None
+        
+        # Generate document
+        from src.core.config import Config
+        from pathlib import Path
+        
+        source_file = None
+        if transcript.get('source_file'):
+            source_file = Path(transcript.get('source_file'))
+        
+        if format == "md":
+            file_path = DocumentExporter.export_markdown(
+                transcription_data=transcription_data,
+                source_file=source_file,
+                translated_text=translated_text,
+                translated_paragraphs=translated_paragraphs
+            )
+        elif format == "txt":
+            file_path = DocumentExporter.export_text(
+                transcription_data=transcription_data,
+                source_file=source_file,
+                translated_text=translated_text,
+                translated_paragraphs=translated_paragraphs
+            )
+        else:  # json
+            file_path = DocumentExporter.export_json(
+                transcription_data=transcription_data,
+                source_file=source_file,
+                translated_text=translated_text,
+                translated_paragraphs=translated_paragraphs
+            )
+        
+        file_path = Path(file_path)
+        
+        # Get relative path from exports directory
+        try:
+            rel_path = file_path.relative_to(Config.EXPORTS_DIR)
+            rel_path_str = str(rel_path).replace('\\', '/')
+        except ValueError:
+            rel_path_str = f"documents/{file_path.name}"
+        
+        # Save to database
+        export_file = None
+        if storage_service:
+            try:
+                file_size = file_path.stat().st_size if file_path.exists() else None
+                export_file = storage_service.save_export_file(
+                    user_id=user_id,
+                    file_path=rel_path_str,
+                    file_type='document',
+                    file_format=format,
+                    transcript_id=transcript_id,
+                    language=target_language if use_translated else transcript.get('language', 'auto'),
+                    is_translated=use_translated,
+                    file_size=file_size
+                )
+            except Exception as e:
+                print(f"Warning: Failed to save export to database: {e}")
+        
+        return {"file": str(file_path), "saved": export_file}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/export/audio")
+async def export_audio(
+    transcript_id: int = Form(...),
+    user_id: int = Form(...),
+    language: str = Form("en"),
+    use_translated: bool = Form(False),
+    target_language: Optional[str] = Form(None),
+    format: str = Form("mp3")  # "mp3" or "wav"
+):
+    """Export transcript as audio (TTS)"""
+    try:
+        from src.export import TTSSynthesizer
+        if not TTSSynthesizer:
+            raise HTTPException(status_code=500, detail="TTS synthesizer not available")
+        
+        # Get transcript
+        transcripts = storage_service.get_user_transcripts(user_id=user_id, limit=1000)
+        transcript = None
+        for t in transcripts:
+            if t.get('id') == transcript_id:
+                transcript = t
+                break
+        
+        if not transcript:
+            raise HTTPException(status_code=404, detail="Transcript not found")
+        
+        # TTS MUST use translated text only - never original transcription
+        # Generate separate audio file per translation language
+        # If target_language not provided, use the most recent translation
+        if not target_language:
+            # Get all translations and use the most recent one
+            all_translations = storage_service.get_translations(
+                user_id=user_id,
+                transcript_id=transcript_id,
+                target_language=None  # Get all translations
+            )
+            if not all_translations or len(all_translations) == 0:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="No translation found. Please translate the transcript first. Audio must be generated from translated text."
+                )
+            # Use the most recent translation (they're ordered by created_at desc)
+            target_language = all_translations[0].get('target_language')
+        
+        # Get translation for the specified language
+        translations = storage_service.get_translations(
+            user_id=user_id,
+            transcript_id=transcript_id,
+            target_language=target_language
+        )
+        
+        if not translations or len(translations) == 0:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Translation to {target_language} not found. Please translate the transcript first."
+            )
+        
+        # Use translated text for TTS (never original)
+        translation = translations[0]
+        text_to_synthesize = translation.get('translated_text', '')
+        synthesis_language = target_language  # Always use target language for TTS
+        
+        if not text_to_synthesize:
+            raise HTTPException(status_code=400, detail="No translated text available for synthesis")
+        
+        # Generate audio with language-specific naming
+        # Format: {base_name}_{transcript_id}_{language}.{format}
+        from src.core.config import Config
+        from pathlib import Path
+        
+        # Create language-specific filename
+        source_file = None
+        if transcript.get('source_file'):
+            source_file = Path(transcript.get('source_file'))
+            base_name = source_file.stem
+        elif transcript.get('source_url'):
+            import re
+            url_name = re.sub(r'[^\w\s-]', '', transcript.get('source_url', ''))
+            base_name = url_name[:50]
+        else:
+            base_name = f"transcript_{transcript_id}"
+        
+        # Include language in filename: {base_name}_{transcript_id}_{language}.{format}
+        audio_filename = f"{base_name}_{transcript_id}_{target_language}.{format}"
+        output_path = Config.EXPORTS_DIR / "audio" / audio_filename
+        
+        tts = TTSSynthesizer()
+        file_path = tts.synthesize(
+            text=text_to_synthesize,
+            language=synthesis_language,
+            output_path=output_path,  # Use language-specific path
+            output_format=format
+        )
+        
+        file_path = Path(file_path)
+        
+        # Get relative path from exports directory
+        try:
+            rel_path = file_path.relative_to(Config.EXPORTS_DIR)
+            rel_path_str = str(rel_path).replace('\\', '/')
+        except ValueError:
+            rel_path_str = f"audio/{file_path.name}"
+        
+        # Save to database
+        export_file = None
+        if storage_service:
+            try:
+                file_size = file_path.stat().st_size if file_path.exists() else None
+                export_file = storage_service.save_export_file(
+                    user_id=user_id,
+                    file_path=rel_path_str,
+                    file_type='audio',
+                    file_format=format,
+                    transcript_id=transcript_id,
+                    language=synthesis_language,
+                    is_translated=use_translated,
+                    file_size=file_size
+                )
+            except Exception as e:
+                print(f"Warning: Failed to save export to database: {e}")
+        
+        return {"file": str(file_path), "saved": export_file}
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -571,9 +1122,16 @@ async def list_exports(
     # Also scan filesystem for files not in database (for backward compatibility)
     from src.core.config import Config
     export_dirs = {
-        'subtitle': Config.EXPORTS_DIR / 'subtitles',
+        'subtitle': Config.EXPORTS_DIR / 'subtitles',  # Note: key is 'subtitle' but dir is 'subtitles'
         'document': Config.EXPORTS_DIR / 'documents',
         'audio': Config.EXPORTS_DIR / 'audio'
+    }
+    
+    # Map file type to actual directory name for path construction
+    dir_name_map = {
+        'subtitle': 'subtitles',  # Use plural for actual path
+        'document': 'documents',
+        'audio': 'audio'
     }
     
     file_type_map = {
@@ -597,7 +1155,9 @@ async def list_exports(
         if dir_path.exists():
             for file_path in dir_path.iterdir():
                 if file_path.is_file():
-                    rel_path = f"{dir_type}/{file_path.name}"
+                    # Use actual directory name (plural) for path
+                    actual_dir = dir_name_map.get(dir_type, dir_type)
+                    rel_path = f"{actual_dir}/{file_path.name}"
                     
                     # Skip if already in database
                     if rel_path in existing_paths:
@@ -678,16 +1238,29 @@ async def download_export(export_id: int, user_id: int):
 async def download_export_by_path(file_path: str, user_id: int):
     """Download export file by path (for files not in database)"""
     from src.core.config import Config
+    from urllib.parse import unquote
+    
+    # URL decode the path (FastAPI should do this, but ensure it's done)
+    file_path = unquote(file_path)
+    
+    # Fix path: normalize 'subtitle' to 'subtitles' (plural)
+    if file_path.startswith('subtitle/'):
+        file_path = file_path.replace('subtitle/', 'subtitles/', 1)
     
     # Security: ensure path is within exports directory
     full_path = Config.EXPORTS_DIR / file_path
     try:
-        full_path.resolve().relative_to(Config.EXPORTS_DIR.resolve())
+        resolved_path = full_path.resolve()
+        resolved_exports_dir = Config.EXPORTS_DIR.resolve()
+        resolved_path.relative_to(resolved_exports_dir)
     except ValueError:
-        raise HTTPException(status_code=403, detail="Invalid file path")
+        raise HTTPException(status_code=403, detail=f"Invalid file path: {file_path}")
     
     if not full_path.exists() or not full_path.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
+        raise HTTPException(
+            status_code=404, 
+            detail=f"File not found: {full_path} (resolved from: {file_path})"
+        )
     
     # Determine content type from extension
     ext = full_path.suffix.lower().lstrip('.')
@@ -707,6 +1280,183 @@ async def download_export_by_path(file_path: str, user_id: int):
         media_type=content_type,
         filename=full_path.name
     )
+
+
+@app.get("/api/exports/{export_id}/content")
+async def get_export_content(export_id: int, user_id: int):
+    """Get export file content (for viewing, not downloading)"""
+    from src.core.config import Config
+    
+    # Try to get from database first
+    export_file = None
+    if storage_service:
+        exports = storage_service.get_user_exports(user_id=user_id, limit=10000)
+        for exp in exports:
+            if exp.get('id') == export_id:
+                export_file = exp
+                break
+    
+    if not export_file:
+        raise HTTPException(status_code=404, detail="Export file not found")
+    
+    # Build full file path
+    file_path = Config.EXPORTS_DIR / export_file['file_path']
+    
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+    
+    # Read file content
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        return {
+            "content": content,
+            "file_format": export_file['file_format'],
+            "file_type": export_file['file_type'],
+            "filename": file_path.name
+        }
+    except UnicodeDecodeError:
+        # Binary file (audio) - return URL instead
+        return {
+            "content": None,
+            "file_format": export_file['file_format'],
+            "file_type": export_file['file_type'],
+            "filename": file_path.name,
+            "url": f"/api/exports/{export_id}/download?user_id={user_id}"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
+
+
+@app.get("/api/exports/file/{file_path:path}/content")
+async def get_export_content_by_path(file_path: str, user_id: int):
+    """Get export file content by path (for viewing, not downloading)"""
+    from src.core.config import Config
+    from urllib.parse import unquote
+    
+    # URL decode the path (FastAPI should do this, but ensure it's done)
+    file_path = unquote(file_path)
+    
+    # Fix path: normalize 'subtitle' to 'subtitles' (plural)
+    if file_path.startswith('subtitle/'):
+        file_path = file_path.replace('subtitle/', 'subtitles/', 1)
+    
+    # Security: ensure path is within exports directory
+    full_path = Config.EXPORTS_DIR / file_path
+    try:
+        resolved_path = full_path.resolve()
+        resolved_exports_dir = Config.EXPORTS_DIR.resolve()
+        resolved_path.relative_to(resolved_exports_dir)
+    except ValueError:
+        raise HTTPException(status_code=403, detail=f"Invalid file path: {file_path}")
+    
+    if not full_path.exists() or not full_path.is_file():
+        raise HTTPException(
+            status_code=404, 
+            detail=f"File not found: {full_path} (resolved from: {file_path})"
+        )
+    
+    # Determine file type from extension
+    ext = full_path.suffix.lower().lstrip('.')
+    file_type_map = {
+        'srt': 'subtitle',
+        'vtt': 'subtitle',
+        'md': 'document',
+        'txt': 'document',
+        'json': 'document',
+        'mp3': 'audio',
+        'wav': 'audio'
+    }
+    file_type = file_type_map.get(ext, 'document')
+    
+    # Read file content (if text file)
+    if file_type in ['subtitle', 'document']:
+        try:
+            with open(full_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            return {
+                "content": content,
+                "file_format": ext,
+                "file_type": file_type,
+                "filename": full_path.name
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
+    else:
+        # Audio file - return URL
+        return {
+            "content": None,
+            "file_format": ext,
+            "file_type": file_type,
+            "filename": full_path.name,
+            "url": f"/api/exports/file/{file_path}/download?user_id={user_id}"
+        }
+
+
+@app.delete("/api/exports/{export_id}")
+async def delete_export(export_id: int, user_id: int):
+    """Delete an export file"""
+    if not storage_service:
+        raise HTTPException(status_code=500, detail="Storage service not available")
+    
+    success = storage_service.delete_export_file(user_id=user_id, export_id=export_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Export file not found or deletion failed")
+    
+    return {"success": True, "message": "Export file deleted successfully"}
+
+
+@app.delete("/api/exports/file/{file_path:path}")
+async def delete_export_by_path(file_path: str, user_id: int):
+    """Delete an export file by path (for files not in database)"""
+    from urllib.parse import unquote
+    
+    if not storage_service:
+        raise HTTPException(status_code=500, detail="Storage service not available")
+    
+    # URL decode the path
+    file_path = unquote(file_path)
+    
+    # Fix path: normalize 'subtitle' to 'subtitles' (plural) for deletion
+    original_path = file_path
+    if file_path.startswith('subtitle/'):
+        file_path = file_path.replace('subtitle/', 'subtitles/', 1)
+    
+    success = storage_service.delete_export_file_by_path(user_id=user_id, file_path=file_path)
+    if not success:
+        # Try with original path in case it's stored differently
+        if original_path != file_path:
+            success = storage_service.delete_export_file_by_path(user_id=user_id, file_path=original_path)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"File not found or deletion failed: {file_path}")
+    
+    return {"success": True, "message": "Export file deleted successfully"}
+
+
+@app.delete("/api/rag/embeddings/{transcript_id}")
+async def delete_transcript_embeddings(transcript_id: int, user_id: int):
+    """Delete embeddings for a specific transcript"""
+    try:
+        from src.rag.vectorstore import FAISSVectorStore
+        vectorstore = FAISSVectorStore(user_id=user_id)
+        vectorstore.delete_by_transcript(transcript_id)
+        return {"success": True, "message": f"Embeddings for transcript {transcript_id} deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete embeddings: {str(e)}")
+
+
+@app.delete("/api/rag/embeddings/all")
+async def delete_all_embeddings(user_id: int):
+    """Delete all embeddings for the user"""
+    try:
+        from src.rag.vectorstore import FAISSVectorStore
+        vectorstore = FAISSVectorStore(user_id=user_id)
+        vectorstore.delete_all()
+        return {"success": True, "message": "All embeddings deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete embeddings: {str(e)}")
 
 
 # RAG endpoints

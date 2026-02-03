@@ -114,17 +114,34 @@ class RobustTranscriber:
                 estimated_quality = 'medium'
                 metadata = {}
             
-            # Step 3: Preprocess audio
+            # Step 3: Smart preprocessing (optimized for speed while maintaining quality)
             preprocessed_audio = audio_path
             if enable_preprocessing:
-                print("🔧 Preprocessing audio (noise reduction, normalization, channel fixing)...")
+                # Check audio quality first to optimize preprocessing
                 try:
-                    preprocessed_audio, preprocess_metadata = AudioPreprocessor.preprocess(
-                        audio_path,
-                        enable_noise_reduction=True,
-                        enable_normalization=True,
-                        enable_channel_fix=True
-                    )
+                    quality_info = AudioPreprocessor.detect_audio_quality(audio_path)
+                    estimated_quality = quality_info.get('estimated_quality', 'medium')
+                    quality_score = quality_info.get('quality_score', 0)
+                    
+                    # For very high quality audio (score >= 5), skip heavy noise reduction
+                    # but still do normalization and channel fix for consistency
+                    if estimated_quality == 'high' and quality_score >= 5:
+                        print(f"🔧 High-quality audio detected (score: {quality_score}), using optimized preprocessing...")
+                        preprocessed_audio, preprocess_metadata = AudioPreprocessor.preprocess(
+                            audio_path,
+                            enable_noise_reduction=False,  # Skip heavy noise reduction for high-quality audio
+                            enable_normalization=True,  # Keep normalization for consistency
+                            enable_channel_fix=True  # Keep channel fix for compatibility
+                        )
+                    else:
+                        # For medium/low quality, use full preprocessing
+                        print("🔧 Preprocessing audio (noise reduction, normalization, channel fixing)...")
+                        preprocessed_audio, preprocess_metadata = AudioPreprocessor.preprocess(
+                            audio_path,
+                            enable_noise_reduction=True,
+                            enable_normalization=True,
+                            enable_channel_fix=True
+                        )
                     
                     # If preprocessing created a new file, track it for cleanup
                     if preprocessed_audio != audio_path:
@@ -193,8 +210,15 @@ class RobustTranscriber:
                         # Add quality report to result
                         result['quality_report'] = quality_report
                         
+                        # Speed optimization: Skip retries if quality is already excellent (>= 85)
+                        # This maintains quality while improving speed for good results
+                        quality_score = quality_report.get('quality_score', 100)
+                        if quality_score >= 85 and is_valid:
+                            print(f"✅ Excellent quality score ({quality_score}), skipping retries")
+                            break  # Exit retry loop early - quality is already excellent
+                        
                         # Check if retry is needed
-                        if not is_valid or quality_report.get('quality_score', 100) < 70:
+                        if not is_valid or quality_score < 70:
                             should_retry, next_model = ModelSelector.should_retry_with_larger_model(
                                 quality_report,
                                 current_model,

@@ -123,17 +123,40 @@ class SubtitleGenerator:
         srt_lines = []
         subtitle_index = 1
         
-        for item in items:
+        # Get original segments/paragraphs for dual-language support
+        original_items = items
+        translated_items = translated_segments if translated_segments else []
+        
+        # Create mapping of original to translated items by timestamp
+        translated_map = {}
+        if translated_items:
+            for t_item in translated_items:
+                start = t_item.get('start', 0.0)
+                translated_map[start] = t_item
+        
+        for item in original_items:
             # Get start and end times
             start_time = item.get('start', 0.0)
             end_time = item.get('end', start_time + 2.0)  # Default 2 seconds if end missing
             
-            # Get text (use translated if available, otherwise original)
-            if translated_text and 'text' in item:
-                # Use translated segment text if available
-                text = item.get('translated_text', item.get('text', ''))
+            # Get original text
+            original_text = item.get('text', '')
+            
+            # Get translated text if available
+            translated_item = translated_map.get(start_time)
+            translated_text_item = translated_item.get('text', '') if translated_item else None
+            
+            # If no translated item found but translated_text provided, use it
+            if not translated_text_item and translated_text:
+                translated_text_item = translated_text
+            
+            # Build subtitle text: include both original and translated if available
+            if translated_text_item and translated_text_item.strip():
+                # Dual-language subtitle: Original / Translated
+                text = f"{original_text}\n{translated_text_item}"
             else:
-                text = item.get('text', '')
+                # Original only
+                text = original_text
             
             if not text.strip():
                 continue
@@ -214,17 +237,40 @@ class SubtitleGenerator:
         # Generate VTT content
         vtt_lines = ["WEBVTT", ""]  # VTT header
         
-        for item in items:
+        # Get original segments/paragraphs for dual-language support
+        original_items = items
+        translated_items = translated_segments if translated_segments else []
+        
+        # Create mapping of original to translated items by timestamp
+        translated_map = {}
+        if translated_items:
+            for t_item in translated_items:
+                start = t_item.get('start', 0.0)
+                translated_map[start] = t_item
+        
+        for item in original_items:
             # Get start and end times
             start_time = item.get('start', 0.0)
             end_time = item.get('end', start_time + 2.0)  # Default 2 seconds if end missing
             
-            # Get text (use translated if available, otherwise original)
-            if translated_text and 'text' in item:
-                # Use translated segment text if available
-                text = item.get('translated_text', item.get('text', ''))
+            # Get original text
+            original_text = item.get('text', '')
+            
+            # Get translated text if available
+            translated_item = translated_map.get(start_time)
+            translated_text_item = translated_item.get('text', '') if translated_item else None
+            
+            # If no translated item found but translated_text provided, use it
+            if not translated_text_item and translated_text:
+                translated_text_item = translated_text
+            
+            # Build subtitle text: include both original and translated if available
+            if translated_text_item and translated_text_item.strip():
+                # Dual-language subtitle: Original / Translated
+                text = f"{original_text}\n{translated_text_item}"
             else:
-                text = item.get('text', '')
+                # Original only
+                text = original_text
             
             if not text.strip():
                 continue

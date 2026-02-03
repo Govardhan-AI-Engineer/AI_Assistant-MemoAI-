@@ -91,7 +91,7 @@ class MultilingualEmbedder:
         embedding = self.model.encode(text, convert_to_numpy=True)
         return embedding
     
-    def embed_batch(self, texts: List[str], batch_size: int = 32, show_progress: bool = False) -> np.ndarray:
+    def embed_batch(self, texts: List[str], batch_size: int = 64, show_progress: bool = False) -> np.ndarray:
         """
         Generate embeddings for multiple texts (batch processing)
         
