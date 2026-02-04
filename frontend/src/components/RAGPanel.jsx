@@ -85,13 +85,17 @@ function RAGPanel({ user }) {
     setDeletingEmbeddings(true)
     setError('')
     try {
-      await axios.delete(`${API_URL}/api/rag/embeddings/all`, {
-        params: { user_id: user.user_id }
+      // Ensure user_id is sent as integer in query params
+      const response = await axios.delete(`${API_URL}/api/rag/embeddings/all`, {
+        params: { 
+          user_id: parseInt(user.user_id, 10) 
+        }
       })
       alert('✅ All embeddings deleted successfully. Re-index transcripts to use question-answering again.')
       loadStats()
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to delete embeddings')
+      console.error('Delete embeddings error:', err)
     } finally {
       setDeletingEmbeddings(false)
     }

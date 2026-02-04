@@ -124,6 +124,42 @@ class RobustTranscriptionTranslationIntegration:
         """Get list of available translation providers"""
         return self.robust_translator.get_available_providers()
     
+    def translate_text(
+        self,
+        text: str,
+        source_language: str,
+        target_language: str,
+        preferred_provider: Optional[str] = None
+    ) -> str:
+        """
+        Translate plain text (for note translation)
+        Uses robust translator for better quality
+        
+        Args:
+            text: Text to translate
+            source_language: Source language code
+            target_language: Target language code
+            preferred_provider: Preferred provider name
+            
+        Returns:
+            Translated text
+        """
+        if not text or not text.strip():
+            return text
+        
+        if source_language == target_language:
+            return text
+        
+        translation_result = self.robust_translator.translate(
+            text=text,
+            target_language=target_language,
+            source_language=source_language,
+            preferred_provider=preferred_provider,
+            use_sentence_by_sentence=True
+        )
+        
+        return translation_result.get('text', text)
+    
     @property
     def translation_service(self):
         """Compatibility property - returns robust translator"""

@@ -2,13 +2,14 @@
 FastAPI main application
 Backend API for React frontend
 """
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 import os
 from pathlib import Path
+import aiofiles
 
 from src.auth import AuthService
 from src.memory import StorageService, SearchService, NoteService
@@ -19,14 +20,56 @@ from src.core.config import Config
 
 app = FastAPI(title="MemoAI API", version="1.0.0")
 
-# CORS middleware for React frontend
+# CORS middleware for React frontend - Allow all origins for development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],  # React dev servers
-    allow_credentials=True,
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=False,  # Must be False when allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "Content-Length", "Content-Type", "Accept-Ranges"],
 )
+
+# Global exception handler to ensure CORS headers on errors
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Ensure CORS headers are included even on HTTP exceptions"""
+    origin = request.headers.get('origin')
+    
+    headers = {}
+    # Allow all origins
+    if origin:
+        headers['Access-Control-Allow-Origin'] = origin
+    else:
+        headers['Access-Control-Allow-Origin'] = '*'
+    
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=headers
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Handle unexpected exceptions with CORS headers"""
+    origin = request.headers.get('origin')
+    
+    headers = {}
+    # Allow all origins
+    if origin:
+        headers['Access-Control-Allow-Origin'] = origin
+    else:
+        headers['Access-Control-Allow-Origin'] = '*'
+    
+    import traceback
+    print(f"❌ Unhandled exception: {exc}")
+    print(traceback.format_exc())
+    
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {str(exc)}"},
+        headers=headers
+    )
 
 # Initialize services
 auth_service = AuthService()
@@ -475,50 +518,189 @@ async def generate_note(
         if not transcript:
             raise HTTPException(status_code=404, detail="Transcript not found")
         
-        # CANONICAL: Always use original transcript text and language
-        # Notes are generated once in the original language, then translated for display
+        # Get original transcript text and language
         transcript_text = transcript.get('text', '')
         original_language = transcript.get('language', 'auto')
         
-        # Generate canonical note (in original transcript language)
-        # This ensures notes are complete, consistent, and deterministic
-        if note_type == "summary":
-            note = note_service.generate_summary(
-                user_id=user_id,
-                transcript_id=transcript_id,
-                transcript_text=transcript_text,
-                language=original_language,  # Always use original language for canonical note
-                force_regenerate=force_regenerate
-            )
-        elif note_type == "key_points":
-            note = note_service.generate_key_points(
-                user_id=user_id,
-                transcript_id=transcript_id,
-                transcript_text=transcript_text,
-                language=original_language,  # Always use original language for canonical note
-                force_regenerate=force_regenerate
-            )
-        else:
-            raise HTTPException(status_code=400, detail="Invalid note_type")
+        # CRITICAL: If target_language is specified, generate notes in target language
+        # Strategy: Translate transcript text first, then generate notes in target language
+        # This ensures notes are generated directly in user's selected language
+        generation_language = original_language
+        text_for_generation = transcript_text
         
-        # If target_language is specified and different from original, translate the note
-        # This ensures notes are displayed in user's preferred language while maintaining canonical source
         if target_language and target_language != 'auto' and target_language != original_language:
+            # Translate transcript text to target language first
             try:
-                # Translate the canonical note content for display
-                from src.translation import TranslationIntegration
                 if translation_integration:
-                    translated_content = translation_integration.translate_text(
-                        text=note.get('content', ''),
+                    print(f"✓ Translating transcript text from {original_language} to {target_language} for note generation")
+                    translated_text = translation_integration.translate_text(
+                        text=transcript_text,
                         source_language=original_language,
                         target_language=target_language
                     )
-                    # Return note with translated content for display
+                    # Accept translation even if same as original (might be legitimate)
+                    if translated_text and translated_text.strip():
+                        text_for_generation = translated_text
+                        generation_language = target_language
+                        print(f"✓ Transcript translated successfully, generating notes in {target_language}")
+                    else:
+                        print(f"⚠ Translation returned empty, using original text for generation")
+                else:
+                    print(f"⚠ Translation integration not available, using original text")
+            except Exception as e:
+                print(f"⚠ Failed to translate transcript for note generation: {e}")
+                print(f"   Continuing with original language ({original_language}) - note will still be generated")
+                # Fallback: use original text - note generation will still work
+                pass
+        
+        # Generate note in the target language (or original if no target specified)
+        try:
+            if note_type == "summary":
+                print(f"✓ Generating summary in {generation_language}...")
+                note = note_service.generate_summary(
+                    user_id=user_id,
+                    transcript_id=transcript_id,
+                    transcript_text=text_for_generation,
+                    language=generation_language,  # Generate in target language if specified
+                    force_regenerate=force_regenerate
+                )
+                print(f"✓ Summary generated successfully")
+            elif note_type == "key_points":
+                print(f"✓ Generating key points in {generation_language}...")
+                note = note_service.generate_key_points(
+                    user_id=user_id,
+                    transcript_id=transcript_id,
+                    transcript_text=text_for_generation,
+                    language=generation_language,  # Generate in target language if specified
+                    force_regenerate=force_regenerate
+                )
+                print(f"✓ Key points generated successfully")
+            else:
+                raise HTTPException(status_code=400, detail="Invalid note_type. Must be 'summary' or 'key_points'")
+        except ValueError as e:
+            # Groq API not available
+            error_msg = str(e)
+            if "Groq API not available" in error_msg:
+                raise HTTPException(
+                    status_code=500, 
+                    detail="Note generation requires Groq API. Please set GROQ_API_KEY in your .env file."
+                )
+            raise HTTPException(status_code=500, detail=f"Failed to generate note: {error_msg}")
+        except Exception as e:
+            print(f"❌ Error generating {note_type}: {e}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Failed to generate {note_type}: {str(e)}")
+        
+        # Note is already in target language if translation was done above
+        # Set display language to match generation language
+        if target_language and target_language != 'auto' and generation_language == target_language:
+            note['display_language'] = target_language
+            # Content is already in target language, so translated_content = content
+            note['translated_content'] = note.get('content', '')
+            print(f"✓ Note generated directly in target language: {target_language}")
+        elif target_language and target_language != 'auto' and generation_language != target_language:
+            # Fallback: If generation failed to use target language, translate the note
+            print(f"⚠ Note generated in {generation_language}, translating to {target_language}")
+            try:
+                # Use semantic-preserving translation for structured content
+                from src.translation.semantic_translator import SemanticTranslator
+                from src.translation import TranslationService
+                
+                # Get translation service from integration
+                trans_service = None
+                if hasattr(translation_integration, 'translation_service'):
+                    # Standard integration
+                    trans_service = translation_integration.translation_service
+                    print(f"✓ Using standard translation service")
+                elif hasattr(translation_integration, 'robust_translator'):
+                    # Robust integration - create a TranslationService wrapper
+                    # The robust translator's orchestrator can be used via TranslationService
+                    # For now, create a new TranslationService instance with same provider priority
+                    try:
+                        trans_service = TranslationService()
+                        print(f"✓ Created TranslationService for robust integration")
+                    except Exception as e:
+                        print(f"⚠ Could not create TranslationService: {e}")
+                        # If TranslationService creation fails, fall back to direct translation
+                        trans_service = None
+                
+                if trans_service:
+                    try:
+                        # Use semantic translator for meaning-preserving translation
+                        semantic_translator = SemanticTranslator(trans_service)
+                        print(f"✓ Using semantic translator for {note_type} translation: {original_language} → {target_language}")
+                        translated_content = semantic_translator.translate_structured_content(
+                            content=note.get('content', ''),
+                            source_language=original_language,
+                            target_language=target_language,
+                            content_type=note_type,  # "key_points" or "summary"
+                            preferred_provider=None
+                        )
+                        print(f"✓ Semantic translation completed, length: {len(translated_content) if translated_content else 0}")
+                    except Exception as e:
+                        print(f"⚠ Semantic translator failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        # Fallback to direct translation
+                        try:
+                            if translation_integration:
+                                translated_content = translation_integration.translate_text(
+                                    text=note.get('content', ''),
+                                    source_language=original_language,
+                                    target_language=target_language
+                                )
+                            else:
+                                translated_content = note.get('content', '')
+                        except Exception as e2:
+                            print(f"⚠ Fallback translation also failed: {e2}")
+                            # Use original content if translation fails
+                            translated_content = note.get('content', '')
+                else:
+                    # Fallback: use integration's translate_text method
+                    try:
+                        if translation_integration:
+                            print(f"✓ Using integration translate_text for {note_type}: {original_language} → {target_language}")
+                            translated_content = translation_integration.translate_text(
+                                text=note.get('content', ''),
+                                source_language=original_language,
+                                target_language=target_language
+                            )
+                            print(f"✓ Direct translation completed, length: {len(translated_content) if translated_content else 0}")
+                        else:
+                            print(f"⚠ No translation integration available")
+                            translated_content = note.get('content', '')
+                    except Exception as e:
+                        print(f"⚠ Translation failed: {e}")
+                        # Use original content if translation fails
+                        translated_content = note.get('content', '')
+                
+                # Return note with translated content for display
+                if translated_content and translated_content.strip():
                     note['translated_content'] = translated_content
                     note['display_language'] = target_language
+                    print(f"✓ Successfully translated {note_type} to {target_language}")
+                else:
+                    print(f"⚠ Warning: Translation returned empty content for {note_type}")
+                    note['translated_content'] = note.get('content', '')
+                    note['display_language'] = original_language
             except Exception as e:
-                print(f"Warning: Could not translate note: {e}")
-                # Return canonical note even if translation fails
+                print(f"⚠ Warning: Could not translate note with semantic preservation: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fallback: try simple translation
+                try:
+                    if translation_integration:
+                        translated_content = translation_integration.translate_text(
+                            text=note.get('content', ''),
+                            source_language=original_language,
+                            target_language=target_language
+                        )
+                        note['translated_content'] = translated_content
+                        note['display_language'] = target_language
+                except Exception as e2:
+                    print(f"Warning: Fallback translation also failed: {e2}")
+                    # Return canonical note even if translation fails
         
         return note
         
@@ -529,8 +711,15 @@ async def generate_note(
 
 
 @app.get("/api/notes")
-async def get_notes(user_id: int, transcript_id: Optional[int] = None):
-    """Get notes for user or transcript"""
+async def get_notes(
+    user_id: int, 
+    transcript_id: Optional[int] = None,
+    target_language: Optional[str] = None
+):
+    """
+    Get notes for user or transcript
+    If target_language is provided, translates notes for display
+    """
     if not storage_service:
         raise HTTPException(status_code=500, detail="Storage service not available")
     
@@ -538,6 +727,92 @@ async def get_notes(user_id: int, transcript_id: Optional[int] = None):
         notes = storage_service.get_transcript_notes(user_id=user_id, transcript_id=transcript_id)
     else:
         notes = storage_service.get_user_notes(user_id=user_id)
+    
+    # If target_language is specified, translate notes for display
+    if target_language and target_language != 'auto' and translation_integration:
+        try:
+            from src.translation.semantic_translator import SemanticTranslator
+            from src.translation import TranslationService
+            
+            # Get translation service
+            trans_service = None
+            if hasattr(translation_integration, 'translation_service'):
+                trans_service = translation_integration.translation_service
+                print(f"✓ GET /api/notes: Using standard translation service")
+            elif hasattr(translation_integration, 'robust_translator'):
+                try:
+                    trans_service = TranslationService()
+                    print(f"✓ GET /api/notes: Created TranslationService for robust integration")
+                except Exception as e:
+                    print(f"⚠ GET /api/notes: Could not create TranslationService: {e}")
+                    trans_service = None
+            
+            # Translate each note
+            translated_count = 0
+            for note in notes:
+                original_language = note.get('language', 'auto')
+                if original_language != target_language:
+                    try:
+                        translated_content = None
+                        if trans_service:
+                            # Use semantic translator
+                            try:
+                                semantic_translator = SemanticTranslator(trans_service)
+                                translated_content = semantic_translator.translate_structured_content(
+                                    content=note.get('content', ''),
+                                    source_language=original_language,
+                                    target_language=target_language,
+                                    content_type=note.get('note_type', 'summary'),
+                                    preferred_provider=None
+                                )
+                            except Exception as e:
+                                print(f"⚠ GET /api/notes: Semantic translation failed for note {note.get('id')}: {e}")
+                                # Fallback to direct translation
+                                if translation_integration:
+                                    translated_content = translation_integration.translate_text(
+                                        text=note.get('content', ''),
+                                        source_language=original_language,
+                                        target_language=target_language
+                                    )
+                        else:
+                            # Fallback to direct translation
+                            if translation_integration:
+                                translated_content = translation_integration.translate_text(
+                                    text=note.get('content', ''),
+                                    source_language=original_language,
+                                    target_language=target_language
+                                )
+                        
+                        # Accept translation even if it's the same as original (might be legitimate)
+                        if translated_content and translated_content.strip():
+                            note['translated_content'] = translated_content
+                            note['display_language'] = target_language
+                            translated_count += 1
+                        else:
+                            # If translation failed or returned empty, use original
+                            print(f"⚠ GET /api/notes: Translation returned empty for note {note.get('id')}, using original")
+                            note['translated_content'] = note.get('content', '')
+                            note['display_language'] = original_language
+                    except Exception as e:
+                        # Silently handle translation errors - use original content
+                        # Don't print warnings for every note to avoid spam
+                        if translated_count == 0:  # Only print once for first error
+                            print(f"⚠ GET /api/notes: Translation error (will use original content): {e}")
+                        # Keep original content if translation fails
+                        note['translated_content'] = note.get('content', '')
+                        note['display_language'] = original_language
+                else:
+                    # Already in target language
+                    note['translated_content'] = note.get('content', '')
+                    note['display_language'] = target_language
+                    translated_count += 1
+            
+            print(f"✓ GET /api/notes: Translated {translated_count}/{len(notes)} notes to {target_language}")
+        except Exception as e:
+            print(f"⚠ GET /api/notes: Translation service error: {e}")
+            import traceback
+            traceback.print_exc()
+            # Continue without translation
     
     return {"notes": notes, "count": len(notes)}
 
@@ -850,6 +1125,7 @@ async def export_subtitles(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
 @app.post("/api/export/documents")
 async def export_documents(
     transcript_id: int = Form(...),
@@ -971,6 +1247,7 @@ async def export_documents(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.post("/api/export/audio")
@@ -1099,8 +1376,6 @@ async def export_audio(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
-# Export file endpoints
 @app.get("/api/exports")
 async def list_exports(
     user_id: int,
@@ -1191,95 +1466,492 @@ async def list_exports(
     
     return {"exports": exports, "count": len(exports)}
 
-
-@app.get("/api/exports/{export_id}/download")
-async def download_export(export_id: int, user_id: int):
-    """Download export file by ID (from database)"""
+def _normalize_export_path(relative_path: str) -> Path:
+    """
+    Normalize a relative export file path to a safe, absolute Path.
+    
+    Handles:
+    - Forward/backward slashes (Windows compatibility)
+    - Leading slashes
+    - Duplicated 'exports/' prefix
+    - Path traversal attempts
+    
+    Args:
+        relative_path: Relative path from exports directory (e.g., "audio/file.mp3")
+    
+    Returns:
+        Normalized Path object within EXPORTS_DIR
+    
+    Raises:
+        ValueError: If path is invalid or attempts traversal
+    """
     from src.core.config import Config
     
-    # Try to get from database first
-    export_file = None
-    if storage_service:
-        exports = storage_service.get_user_exports(user_id=user_id, limit=10000)
-        for exp in exports:
-            if exp.get('id') == export_id:
-                export_file = exp
-                break
+    # Remove leading slashes and normalize separators
+    normalized = relative_path.lstrip('/\\').replace('\\', '/')
     
-    if not export_file:
-        raise HTTPException(status_code=404, detail="Export file not found")
+    # Remove duplicated 'exports/' prefix if present
+    if normalized.startswith('exports/'):
+        normalized = normalized[8:]  # Remove 'exports/'
     
-    # Build full file path
-    file_path = Config.EXPORTS_DIR / export_file['file_path']
+    # Remove any remaining leading slashes
+    normalized = normalized.lstrip('/')
     
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found on disk")
+    # Security: Check for path traversal attempts
+    if '..' in normalized or normalized.startswith('/'):
+        raise ValueError(f"Invalid path: contains traversal or absolute path")
     
-    # Determine content type
-    content_type_map = {
-        'srt': 'text/plain',
-        'vtt': 'text/vtt',
-        'md': 'text/markdown',
-        'txt': 'text/plain',
-        'json': 'application/json',
-        'mp3': 'audio/mpeg',
-        'wav': 'audio/wav'
-    }
-    content_type = content_type_map.get(export_file['file_format'], 'application/octet-stream')
+    # Build full path
+    full_path = Config.EXPORTS_DIR / normalized
     
-    return FileResponse(
-        path=str(file_path),
-        media_type=content_type,
-        filename=file_path.name
-    )
-
-
-@app.get("/api/exports/file/{file_path:path}/download")
-async def download_export_by_path(file_path: str, user_id: int):
-    """Download export file by path (for files not in database)"""
-    from src.core.config import Config
-    from urllib.parse import unquote
-    
-    # URL decode the path (FastAPI should do this, but ensure it's done)
-    file_path = unquote(file_path)
-    
-    # Fix path: normalize 'subtitle' to 'subtitles' (plural)
-    if file_path.startswith('subtitle/'):
-        file_path = file_path.replace('subtitle/', 'subtitles/', 1)
-    
-    # Security: ensure path is within exports directory
-    full_path = Config.EXPORTS_DIR / file_path
+    # Resolve to absolute path and verify it's within EXPORTS_DIR
     try:
         resolved_path = full_path.resolve()
         resolved_exports_dir = Config.EXPORTS_DIR.resolve()
+        
+        # Ensure the resolved path is within exports directory
         resolved_path.relative_to(resolved_exports_dir)
-    except ValueError:
-        raise HTTPException(status_code=403, detail=f"Invalid file path: {file_path}")
+        
+        return resolved_path
+    except (ValueError, OSError) as e:
+        raise ValueError(f"Path traversal detected or invalid path: {relative_path}")
+
+
+def _get_file_response(file_path: Path, content_type: str, filename: str, force_download: bool = False, request_origin: Optional[str] = None):
+    """
+    Create a FileResponse for file download/playback.
+    FileResponse is simpler and has better CORS support than StreamingResponse.
     
-    if not full_path.exists() or not full_path.is_file():
-        raise HTTPException(
-            status_code=404, 
-            detail=f"File not found: {full_path} (resolved from: {file_path})"
-        )
+    Args:
+        file_path: Absolute path to the file
+        content_type: MIME type
+        filename: Filename for Content-Disposition header
+        force_download: If True, force download; if False, allow inline playback
+        request_origin: Origin header from request (for CORS)
     
-    # Determine content type from extension
-    ext = full_path.suffix.lower().lstrip('.')
-    content_type_map = {
-        'srt': 'text/plain',
-        'vtt': 'text/vtt',
-        'md': 'text/markdown',
-        'txt': 'text/plain',
-        'json': 'application/json',
-        'mp3': 'audio/mpeg',
-        'wav': 'audio/wav'
+    Returns:
+        FileResponse with proper headers including CORS
+    """
+    # Verify file exists and is readable
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+    
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Path is not a file: {file_path}")
+    
+    try:
+        # Verify we can read the file
+        file_path.stat()
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Cannot read file: {str(e)}")
+    
+    # Determine Content-Disposition
+    if force_download:
+        disposition = f'attachment; filename="{filename}"'
+    else:
+        # For audio files, use 'inline' to allow playback
+        if content_type.startswith('audio/'):
+            disposition = f'inline; filename="{filename}"'
+        else:
+            disposition = f'attachment; filename="{filename}"'
+    
+    # Build headers with explicit CORS support
+    headers = {
+        'Content-Disposition': disposition,
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'public, max-age=3600',
     }
-    content_type = content_type_map.get(ext, 'application/octet-stream')
     
+    # Add explicit CORS headers (allow all origins)
+    if request_origin:
+        headers['Access-Control-Allow-Origin'] = request_origin
+    else:
+        headers['Access-Control-Allow-Origin'] = '*'
+    headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    headers['Access-Control-Allow-Headers'] = '*'
+    headers['Access-Control-Expose-Headers'] = 'Content-Disposition, Content-Length, Content-Type, Accept-Ranges'
+    
+    # Use FileResponse with explicit CORS headers
     return FileResponse(
-        path=str(full_path),
+        path=str(file_path),
         media_type=content_type,
-        filename=full_path.name
+        filename=filename,
+        headers=headers
     )
+
+
+@app.options("/api/exports/{export_id}/download")
+async def download_export_options(export_id: int, request: Request):
+    """Handle CORS preflight for download endpoint"""
+    origin = request.headers.get('origin')
+    
+    headers = {
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': '*',
+        'Access-Control-Max-Age': '3600',
+    }
+    
+    # Allow all origins
+    if origin:
+        headers['Access-Control-Allow-Origin'] = origin
+    else:
+        headers['Access-Control-Allow-Origin'] = '*'
+    
+    return JSONResponse(content={}, headers=headers)
+
+
+@app.get("/api/exports/{export_id}/download")
+async def download_export(
+    export_id: int, 
+    user_id: int,
+    request: Request,
+    force_download: bool = False
+):
+    """
+    Download export file by ID (from database).
+    
+    Args:
+        export_id: Export file ID from database
+        user_id: User ID for authorization
+        request: FastAPI Request object (for CORS origin)
+        force_download: If True, force download; if False, allow inline playback for audio
+    """
+    from src.core.config import Config
+    import traceback
+    
+    try:
+        # Get origin from request headers for CORS
+        origin = request.headers.get('origin')
+        
+        # Try to get from database first
+        export_file = None
+        if storage_service:
+            exports = storage_service.get_user_exports(user_id=user_id, limit=10000)
+            for exp in exports:
+                if exp.get('id') == export_id:
+                    export_file = exp
+                    break
+        
+        if not export_file:
+            raise HTTPException(status_code=404, detail="Export file not found")
+        
+        # Normalize and resolve file path
+        try:
+            stored_path = export_file['file_path']
+            print(f"🔍 DEBUG: Stored path from DB: '{stored_path}'")
+            print(f"🔍 DEBUG: EXPORTS_DIR: {Config.EXPORTS_DIR}")
+            file_path = _normalize_export_path(stored_path)
+            print(f"🔍 DEBUG: Normalized path: {file_path}")
+            print(f"🔍 DEBUG: Path exists: {file_path.exists()}, is_file: {file_path.is_file() if file_path.exists() else 'N/A'}")
+        except ValueError as e:
+            print(f"❌ Path normalization error: {e}")
+            print(f"❌ Stored path was: '{stored_path}'")
+            raise HTTPException(status_code=400, detail=f"Invalid file path: {str(e)}")
+        
+        # Verify file exists
+        if not file_path.exists() or not file_path.is_file():
+            # Try alternative locations (for backward compatibility)
+            alt_paths = [
+                Config.EXPORTS_DIR / stored_path,
+                Config.EXPORTS_DIR / "audio" / Path(stored_path).name,
+                Config.EXPORTS_DIR / "subtitles" / Path(stored_path).name,
+                Config.EXPORTS_DIR / "documents" / Path(stored_path).name,
+            ]
+            
+            file_path = None
+            for alt_path in alt_paths:
+                try:
+                    resolved = alt_path.resolve()
+                    if resolved.exists() and resolved.is_file():
+                        # Verify it's still within EXPORTS_DIR
+                        resolved.relative_to(Config.EXPORTS_DIR.resolve())
+                        file_path = resolved
+                        print(f"✓ Found file at alternative path: {file_path}")
+                        break
+                except (ValueError, OSError) as e:
+                    continue
+            
+            if not file_path:
+                print(f"❌ File not found. Stored path: {stored_path}, EXPORTS_DIR: {Config.EXPORTS_DIR}")
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"File not found on disk. Stored path: {stored_path}"
+                )
+        
+        print(f"✓ Serving file: {file_path}")
+        
+        # Determine content type
+        content_type_map = {
+            'srt': 'text/plain',
+            'vtt': 'text/vtt',
+            'md': 'text/markdown',
+            'txt': 'text/plain',
+            'json': 'application/json',
+            'mp3': 'audio/mpeg',
+            'wav': 'audio/wav'
+        }
+        content_type = content_type_map.get(export_file.get('file_format', '').lower(), 'application/octet-stream')
+        
+        # Use file extension as fallback if format not in map
+        if content_type == 'application/octet-stream':
+            ext = file_path.suffix.lower().lstrip('.')
+            content_type = content_type_map.get(ext, 'application/octet-stream')
+        
+        return _get_file_response(
+            file_path=file_path,
+            content_type=content_type,
+            filename=file_path.name,
+            force_download=force_download,
+            request_origin=origin
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in download_export: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
+
+
+@app.options("/api/exports/file/{file_path:path}/download")
+async def download_export_by_path_options(file_path: str, request: Request):
+    """Handle CORS preflight for path-based download endpoint"""
+    origin = request.headers.get('origin')
+    
+    headers = {
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': '*',
+        'Access-Control-Max-Age': '3600',
+    }
+    
+    # Allow all origins
+    if origin:
+        headers['Access-Control-Allow-Origin'] = origin
+    else:
+        headers['Access-Control-Allow-Origin'] = '*'
+    
+    return JSONResponse(content={}, headers=headers)
+
+
+@app.options("/api/download/file/{file_type}/{filename}")
+async def download_file_direct_options(file_type: str, filename: str, request: Request):
+    """Handle CORS preflight for direct file download endpoint"""
+    origin = request.headers.get('origin')
+    
+    headers = {
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': '*',
+        'Access-Control-Max-Age': '3600',
+    }
+    
+    # Allow all origins
+    if origin:
+        headers['Access-Control-Allow-Origin'] = origin
+    else:
+        headers['Access-Control-Allow-Origin'] = '*'
+    
+    return JSONResponse(content={}, headers=headers)
+
+
+@app.get("/api/download/file/{file_type}/{filename}")
+async def download_file_direct(
+    file_type: str,  # 'audio', 'documents', or 'subtitles'
+    filename: str,
+    request: Request,
+    force_download: bool = False
+):
+    """
+    Simple direct file download from exports directories.
+    Downloads files from: audio/, documents/, or subtitles/ directories.
+    
+    Args:
+        file_type: One of 'audio', 'documents', or 'subtitles'
+        filename: Name of the file to download
+        request: FastAPI Request object (for CORS)
+        force_download: If True, force download; if False, allow inline playback for audio
+    
+    Example:
+        GET /api/download/file/audio/myfile.mp3
+        GET /api/download/file/documents/myfile.md
+        GET /api/download/file/subtitles/myfile.srt
+    """
+    from src.core.config import Config
+    from urllib.parse import unquote
+    import traceback
+    
+    try:
+        # Get origin for CORS
+        origin = request.headers.get('origin')
+        
+        # URL decode filename
+        filename = unquote(filename)
+        
+        # Validate file_type
+        allowed_types = ['audio', 'documents', 'subtitles']
+        if file_type not in allowed_types:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid file_type. Must be one of: {', '.join(allowed_types)}"
+            )
+        
+        # Build file path
+        file_path = Config.EXPORTS_DIR / file_type / filename
+        
+        # Security: Verify file is within exports directory
+        try:
+            resolved_path = file_path.resolve()
+            resolved_exports_dir = Config.EXPORTS_DIR.resolve()
+            resolved_path.relative_to(resolved_exports_dir)
+        except (ValueError, OSError):
+            raise HTTPException(status_code=403, detail="Invalid file path")
+        
+        # Verify file exists
+        if not file_path.exists() or not file_path.is_file():
+            raise HTTPException(
+                status_code=404, 
+                detail=f"File not found: {filename} in {file_type}/ directory"
+            )
+        
+        print(f"✓ Serving file: {file_path}")
+        
+        # Determine content type from extension
+        ext = file_path.suffix.lower().lstrip('.')
+        content_type_map = {
+            'srt': 'text/plain',
+            'vtt': 'text/vtt',
+            'md': 'text/markdown',
+            'txt': 'text/plain',
+            'json': 'application/json',
+            'mp3': 'audio/mpeg',
+            'wav': 'audio/wav',
+            'm4a': 'audio/mp4',
+            'ogg': 'audio/ogg'
+        }
+        content_type = content_type_map.get(ext, 'application/octet-stream')
+        
+        # Use the existing _get_file_response function
+        return _get_file_response(
+            file_path=file_path,
+            content_type=content_type,
+            filename=filename,
+            force_download=force_download,
+            request_origin=origin
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in download_file_direct: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
+
+
+@app.get("/api/exports/file/{file_path:path}/download")
+async def download_export_by_path(
+    file_path: str, 
+    user_id: int,
+    request: Request,
+    force_download: bool = False
+):
+    """
+    Download export file by path (for files not in database).
+    
+    Args:
+        file_path: Relative path from exports directory (e.g., "audio/file.mp3")
+        user_id: User ID for authorization
+        request: FastAPI Request object (for CORS origin)
+        force_download: If True, force download; if False, allow inline playback for audio
+    """
+    from src.core.config import Config
+    from urllib.parse import unquote
+    import traceback
+    
+    try:
+        # Get origin from request headers for CORS
+        origin = request.headers.get('origin')
+        
+        # URL decode the path (FastAPI should do this, but ensure it's done)
+        file_path = unquote(file_path)
+        
+        # Fix path: normalize 'subtitle' to 'subtitles' (plural)
+        if file_path.startswith('subtitle/'):
+            file_path = file_path.replace('subtitle/', 'subtitles/', 1)
+        
+        # Normalize and resolve file path (with security checks)
+        try:
+            resolved_path = _normalize_export_path(file_path)
+        except ValueError as e:
+            print(f"❌ Path normalization error: {e}")
+            raise HTTPException(status_code=403, detail=f"Invalid file path: {str(e)}")
+        
+        # Verify file exists
+        if not resolved_path.exists() or not resolved_path.is_file():
+            # Try alternative locations (for backward compatibility)
+            alt_paths = [
+                Config.EXPORTS_DIR / file_path,
+                Config.EXPORTS_DIR / "audio" / Path(file_path).name,
+                Config.EXPORTS_DIR / "subtitles" / Path(file_path).name,
+                Config.EXPORTS_DIR / "documents" / Path(file_path).name,
+            ]
+            
+            found_path = None
+            for alt_path in alt_paths:
+                try:
+                    resolved = alt_path.resolve()
+                    if resolved.exists() and resolved.is_file():
+                        # Verify it's still within EXPORTS_DIR
+                        resolved.relative_to(Config.EXPORTS_DIR.resolve())
+                        found_path = resolved
+                        print(f"✓ Found file at alternative path: {found_path}")
+                        break
+                except (ValueError, OSError):
+                    continue
+            
+            if not found_path:
+                print(f"❌ File not found. Path: {file_path}, EXPORTS_DIR: {Config.EXPORTS_DIR}")
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"File not found: {resolved_path} (resolved from: {file_path})"
+                )
+            
+            resolved_path = found_path
+        
+        print(f"✓ Serving file: {resolved_path}")
+        
+        # Determine content type from extension
+        ext = resolved_path.suffix.lower().lstrip('.')
+        content_type_map = {
+            'srt': 'text/plain',
+            'vtt': 'text/vtt',
+            'md': 'text/markdown',
+            'txt': 'text/plain',
+            'json': 'application/json',
+            'mp3': 'audio/mpeg',
+            'wav': 'audio/wav'
+        }
+        content_type = content_type_map.get(ext, 'application/octet-stream')
+        
+        return _get_file_response(
+            file_path=resolved_path,
+            content_type=content_type,
+            filename=resolved_path.name,
+            force_download=force_download,
+            request_origin=origin
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in download_export_by_path: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
+
 
 
 @app.get("/api/exports/{export_id}/content")
@@ -1395,6 +2067,8 @@ async def get_export_content_by_path(file_path: str, user_id: int):
         }
 
 
+
+
 @app.delete("/api/exports/{export_id}")
 async def delete_export(export_id: int, user_id: int):
     """Delete an export file"""
@@ -1406,8 +2080,6 @@ async def delete_export(export_id: int, user_id: int):
         raise HTTPException(status_code=404, detail="Export file not found or deletion failed")
     
     return {"success": True, "message": "Export file deleted successfully"}
-
-
 @app.delete("/api/exports/file/{file_path:path}")
 async def delete_export_by_path(file_path: str, user_id: int):
     """Delete an export file by path (for files not in database)"""
@@ -1436,7 +2108,7 @@ async def delete_export_by_path(file_path: str, user_id: int):
 
 
 @app.delete("/api/rag/embeddings/{transcript_id}")
-async def delete_transcript_embeddings(transcript_id: int, user_id: int):
+async def delete_transcript_embeddings(transcript_id: int, user_id: int = Query(...)):
     """Delete embeddings for a specific transcript"""
     try:
         from src.rag.vectorstore import FAISSVectorStore
@@ -1451,12 +2123,47 @@ async def delete_transcript_embeddings(transcript_id: int, user_id: int):
 async def delete_all_embeddings(user_id: int):
     """Delete all embeddings for the user"""
     try:
+        # Ensure user_id is valid
+        if user_id < 1:
+            raise HTTPException(status_code=422, detail="Invalid user_id: must be >= 1")
+        
         from src.rag.vectorstore import FAISSVectorStore
         vectorstore = FAISSVectorStore(user_id=user_id)
+        
+        # Get stats before deletion for logging
+        stats_before = vectorstore.get_stats()
+        num_vectors = stats_before.get('num_vectors', 0)
+        
+        # Delete all embeddings
         vectorstore.delete_all()
-        return {"success": True, "message": "All embeddings deleted successfully"}
+        
+        # Verify deletion
+        stats_after = vectorstore.get_stats()
+        num_vectors_after = stats_after.get('num_vectors', 0)
+        
+        if num_vectors_after > 0:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Deletion incomplete: {num_vectors_after} vectors still remain"
+            )
+        
+        return {
+            "success": True, 
+            "message": f"All embeddings deleted successfully ({num_vectors} vectors removed)",
+            "vectors_deleted": num_vectors
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid user_id: {str(e)}")
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete embeddings: {str(e)}")
+        import traceback
+        print(f"❌ Error deleting embeddings: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to delete embeddings: {str(e)}"
+        )
 
 
 # RAG endpoints
@@ -1540,8 +2247,8 @@ async def index_all_transcripts_for_rag(
 async def rag_query(
     question: str = Form(...),
     user_id: int = Form(...),
-    top_k: int = Form(5),
-    min_similarity: float = Form(0.3),
+    top_k: int = Form(10),  # Increased default for better fact coverage
+    min_similarity: float = Form(0.2),  # Lower default for better multilingual support
     use_advanced: bool = Form(True)
 ):
     """Query Advanced RAG system with a question"""

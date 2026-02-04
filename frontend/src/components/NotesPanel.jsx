@@ -46,7 +46,7 @@ function FormattedKeyPoints({ content, className = 'key-points-list' }) {
   )
 }
 
-function NotesPanel({ user, transcriptId, targetLanguage = null }) {
+function NotesPanel({ user, transcriptId, targetLanguage = null, onTranscriptSelect = null }) {
   const [notes, setNotes] = useState([])
   const [loading, setLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
@@ -55,22 +55,72 @@ function NotesPanel({ user, transcriptId, targetLanguage = null }) {
   const [selectedNote, setSelectedNote] = useState(null)
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [deleting, setDeleting] = useState(null)
+  const [transcripts, setTranscripts] = useState([])
+  const [selectedTranscriptId, setSelectedTranscriptId] = useState(transcriptId || null)
+  const [loadingTranscripts, setLoadingTranscripts] = useState(false)
 
+  // Load transcripts list on mount
+  useEffect(() => {
+    loadTranscripts()
+  }, [])
+
+  // Update selected transcript when prop changes
   useEffect(() => {
     if (transcriptId) {
-      loadNotes()
+      setSelectedTranscriptId(transcriptId)
     }
   }, [transcriptId])
 
-  const loadNotes = async () => {
+  // Load notes only when transcript changes (NOT when language changes)
+  useEffect(() => {
+    if (selectedTranscriptId) {
+      loadNotes()
+    } else {
+      setNotes([])
+    }
+  }, [selectedTranscriptId]) // Removed selectedLanguage from dependencies
+
+  // When language changes, just update the state (don't reload/translate notes)
+  const handleLanguageChange = (newLanguage) => {
+    setSelectedLanguage(newLanguage)
+    // Don't reload notes - notes are shown in their original language
+    // User must click "Generate Summary" or "Generate Key Points" to generate in selected language
+  }
+
+  const loadTranscripts = async () => {
     try {
-      setLoading(true)
-      const response = await axios.get(`${API_URL}/api/notes`, {
+      setLoadingTranscripts(true)
+      const response = await axios.get(`${API_URL}/api/transcripts`, {
         params: {
           user_id: user.user_id,
-          transcript_id: transcriptId
+          limit: 100
         }
       })
+      setTranscripts(response.data.transcripts || [])
+    } catch (err) {
+      console.error('Failed to load transcripts:', err)
+    } finally {
+      setLoadingTranscripts(false)
+    }
+  }
+
+  const loadNotes = async () => {
+    if (!selectedTranscriptId) {
+      setNotes([])
+      return
+    }
+
+    try {
+      setLoading(true)
+      const params = {
+        user_id: user.user_id,
+        transcript_id: selectedTranscriptId
+      }
+      
+      // DON'T pass target_language - show notes in their original language
+      // Notes will only be generated in selected language when user clicks generate buttons
+      
+      const response = await axios.get(`${API_URL}/api/notes`, { params })
       setNotes(response.data.notes || [])
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to load notes')
@@ -80,30 +130,51 @@ function NotesPanel({ user, transcriptId, targetLanguage = null }) {
   }
 
   const generateNote = async (noteType, forceRegenerate = false) => {
+    if (!selectedTranscriptId) {
+      setError('Please select a transcript first')
+      return
+    }
+
+    if (!selectedLanguage || selectedLanguage === 'auto') {
+      setError('Please select a target language for note generation')
+      return
+    }
+
     try {
       setGenerating(true)
       setError('')
       const formData = new FormData()
-      formData.append('transcript_id', transcriptId)
+      formData.append('transcript_id', selectedTranscriptId)
       formData.append('user_id', user.user_id)
       formData.append('note_type', noteType)
       formData.append('force_regenerate', forceRegenerate)
       
-      // Add target language if specified (not 'auto')
-      // Note: Notes are canonical (generated once in original language)
-      // This language is only for display/translation purposes
-      if (selectedLanguage && selectedLanguage !== 'auto') {
-        formData.append('target_language', selectedLanguage)
-      }
+      // CRITICAL: Always send target_language - notes will be generated in this language
+      // This ensures notes match transcription meaning in the selected language
+      formData.append('target_language', selectedLanguage)
 
       const response = await axios.post(`${API_URL}/api/notes/generate`, formData)
       
-      // Reload notes
+      // Reload notes to get newly generated notes in target language
       await loadNotes()
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to generate note')
     } finally {
       setGenerating(false)
+    }
+  }
+
+  const handleTranscriptSelect = (e) => {
+    const newTranscriptId = parseInt(e.target.value)
+    setSelectedTranscriptId(newTranscriptId)
+    setNotes([]) // Clear notes when transcript changes
+    
+    // Notify parent if callback provided
+    if (onTranscriptSelect && newTranscriptId) {
+      const selectedTranscript = transcripts.find(t => t.id === newTranscriptId)
+      if (selectedTranscript) {
+        onTranscriptSelect(selectedTranscript)
+      }
     }
   }
 
@@ -150,12 +221,13 @@ function NotesPanel({ user, transcriptId, targetLanguage = null }) {
     }
   }, [targetLanguage])
 
-  if (!transcriptId) {
-    return (
-      <div className="notes-panel">
-        <p>Select a transcript to view or generate notes.</p>
-      </div>
-    )
+  const formatTranscriptName = (transcript) => {
+    let name = transcript.source_file || transcript.source_url || 'Untitled'
+    if (name.includes('/') || name.includes('\\')) {
+      name = name.split(/[/\\]/).pop()
+    }
+    name = name.replace(/\.[^/.]+$/, '')
+    return name || 'Untitled Transcript'
   }
 
   return (
@@ -163,37 +235,64 @@ function NotesPanel({ user, transcriptId, targetLanguage = null }) {
       <div className="notes-header">
         <h3>📝 Notes</h3>
         <div className="notes-controls">
+          <div className="transcript-selector">
+            <label>Select Transcript:</label>
+            <select
+              value={selectedTranscriptId || ''}
+              onChange={handleTranscriptSelect}
+              disabled={generating || loadingTranscripts}
+            >
+              <option value="">-- Select a transcript --</option>
+              {transcripts.map((transcript) => (
+                <option key={transcript.id} value={transcript.id}>
+                  {formatTranscriptName(transcript)} ({transcript.language || 'auto'})
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="language-selector">
-            <label>Note Language:</label>
+            <label>Target Language:</label>
             <select
               value={selectedLanguage}
-              onChange={(e) => setSelectedLanguage(e.target.value)}
-              disabled={generating}
+              onChange={(e) => handleLanguageChange(e.target.value)}
+              disabled={generating || !selectedTranscriptId}
             >
               <option value="auto">Original Language</option>
               <option value="en">English</option>
               <option value="hi">Hindi</option>
               <option value="te">Telugu</option>
               <option value="ta">Tamil</option>
+              <option value="kn">Kannada</option>
+              <option value="ml">Malayalam</option>
+              <option value="bn">Bengali</option>
+              <option value="mr">Marathi</option>
+              <option value="gu">Gujarati</option>
+              <option value="pa">Punjabi</option>
               <option value="fr">French</option>
               <option value="es">Spanish</option>
               <option value="de">German</option>
               <option value="it">Italian</option>
               <option value="pt">Portuguese</option>
+              <option value="zh">Chinese</option>
+              <option value="ja">Japanese</option>
+              <option value="ko">Korean</option>
+              <option value="ar">Arabic</option>
             </select>
           </div>
           <div className="note-actions">
             <button
               onClick={() => generateNote('summary')}
-              disabled={generating}
+              disabled={generating || !selectedTranscriptId || !selectedLanguage || selectedLanguage === 'auto'}
               className="btn-generate"
+              title={!selectedTranscriptId ? 'Select a transcript first' : (!selectedLanguage || selectedLanguage === 'auto') ? 'Select a target language first' : 'Generate summary in selected language'}
             >
               {generating ? 'Generating...' : 'Generate Summary'}
             </button>
             <button
               onClick={() => generateNote('key_points')}
-              disabled={generating}
+              disabled={generating || !selectedTranscriptId || !selectedLanguage || selectedLanguage === 'auto'}
               className="btn-generate"
+              title={!selectedTranscriptId ? 'Select a transcript first' : (!selectedLanguage || selectedLanguage === 'auto') ? 'Select a target language first' : 'Generate key points in selected language'}
             >
               {generating ? 'Generating...' : 'Generate Key Points'}
             </button>
@@ -203,19 +302,33 @@ function NotesPanel({ user, transcriptId, targetLanguage = null }) {
 
       {error && <div className="error">{error}</div>}
 
-      {loading ? (
+      {!selectedTranscriptId ? (
+        <div className="empty-state" style={{ padding: '2rem', textAlign: 'center', color: '#666' }}>
+          <p>Please select a transcript to view or generate notes.</p>
+        </div>
+      ) : loading ? (
         <div className="loading">Loading notes...</div>
       ) : (
         <div className="notes-list">
           {notes.length === 0 ? (
             <div className="empty-state">
-              <p>No notes yet. Generate a summary or key points to get started.</p>
+              <p>No notes yet. Select a target language and click "Generate Summary" or "Generate Key Points" to create notes in your selected language.</p>
+              <p style={{ marginTop: '0.5rem', fontSize: '0.9em', color: '#888' }}>
+                Notes will be generated directly in the selected language (not translated).
+              </p>
             </div>
           ) : (
             notes.map((note) => (
               <div key={note.id} className="note-card">
                 <div className="note-header">
-                  <span className="note-type">{note.note_type === 'summary' ? '📄 Summary' : '🔑 Key Points'}</span>
+                  <span className="note-type">
+                    {note.note_type === 'summary' ? '📄 Summary' : '🔑 Key Points'}
+                    {note.language && note.language !== 'auto' && (
+                      <span className="note-language-badge" title={`Language: ${note.language}`}>
+                        {' '}({note.language})
+                      </span>
+                    )}
+                  </span>
                   <div className="note-header-actions">
                     <span className="note-date">
                       {new Date(note.created_at).toLocaleDateString()}
@@ -242,7 +355,7 @@ function NotesPanel({ user, transcriptId, targetLanguage = null }) {
                   ) : (
                     <div>
                       <p>{truncateText(note.content)}</p>
-                      {note.content.length > 150 && (
+                      {note.content && note.content.length > 150 && (
                         <div className="view-full">Click to view full content →</div>
                       )}
                     </div>

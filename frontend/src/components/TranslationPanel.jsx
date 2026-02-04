@@ -5,7 +5,7 @@ import './TranslationPanel.css'
 
 const API_URL = 'http://localhost:8000'
 
-function TranslationPanel({ user, transcript, onLanguageChange }) {
+function TranslationPanel({ user, transcript, onLanguageChange, onNavigateToNotes }) {
   const [targetLanguage, setTargetLanguage] = useState('en')
   const [provider, setProvider] = useState('auto')
   const [granularity, setGranularity] = useState('whole_text')
@@ -130,6 +130,34 @@ function TranslationPanel({ user, transcript, onLanguageChange }) {
             <span>Provider: {translation.provider || 'unknown'}</span>
             <span>Language: {translation.target_language}</span>
           </div>
+          
+          {/* Generate Notes Section */}
+          {transcript && (
+            <div className="generate-notes-section">
+              <h4>Generate Notes</h4>
+              <p className="notes-description">
+                Generate summary and key points in <strong>{translation.target_language.toUpperCase()}</strong>
+              </p>
+              <div className="notes-buttons">
+                <button
+                  className="btn-generate-notes"
+                  onClick={() => {
+                    // Notify parent to switch to notes tab with target language
+                    if (onLanguageChange) {
+                      onLanguageChange(translation.target_language)
+                    }
+                    // Navigate to notes tab
+                    if (onNavigateToNotes) {
+                      onNavigateToNotes(translation.target_language)
+                    }
+                  }}
+                >
+                  📝 Generate Notes
+                </button>
+              </div>
+            </div>
+          )}
+          
           {transcript && (
             <div className="export-actions">
               <h4>Export Options</h4>

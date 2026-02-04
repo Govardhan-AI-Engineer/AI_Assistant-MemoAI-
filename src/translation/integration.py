@@ -186,3 +186,40 @@ class TranscriptionTranslationIntegration:
             translated_paragraphs.append(translated_para)
         
         return translated_paragraphs
+    
+    def translate_text(
+        self,
+        text: str,
+        source_language: str,
+        target_language: str,
+        preferred_provider: Optional[str] = None,
+        granularity: TranslationGranularity = TranslationGranularity.WHOLE_TEXT
+    ) -> str:
+        """
+        Translate plain text (for note translation)
+        
+        Args:
+            text: Text to translate
+            source_language: Source language code
+            target_language: Target language code
+            preferred_provider: Preferred provider name
+            granularity: Translation granularity
+            
+        Returns:
+            Translated text
+        """
+        if not text or not text.strip():
+            return text
+        
+        if source_language == target_language:
+            return text
+        
+        translation_result = self.translation_service.translate(
+            text=text,
+            target_language=target_language,
+            source_language=source_language,
+            granularity=granularity,
+            preferred_provider=preferred_provider
+        )
+        
+        return translation_result.get('text', text)

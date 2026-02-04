@@ -125,9 +125,9 @@ class GoogleTranslateProvider(TranslationProvider):
                     if not translated_text or translated_text.strip() == '':
                         raise TranslationError("Google Translate (deep-translator) returned empty result")
                     
-                    # Verify translation actually happened
-                    if translated_text.strip() == text.strip():
-                        raise TranslationError("Translation returned same text - translation may have failed")
+                    # Note: Don't fail if translation returns same text - this can happen legitimately
+                    # (e.g., proper nouns, already in target language, or very short text)
+                    # The caller can decide if this is acceptable
                     
                     return translated_text
                 except Exception as e:
@@ -194,9 +194,9 @@ class GoogleTranslateProvider(TranslationProvider):
             if not translated_text or translated_text.strip() == '':
                 raise TranslationError("Google Translate returned empty result")
             
-            # Verify translation actually happened (not same as source)
-            if translated_text.strip() == text.strip():
-                raise TranslationError(f"Translation returned same text - translation may have failed")
+            # Note: Don't fail if translation returns same text - this can happen legitimately
+            # (e.g., proper nouns, already in target language, or very short text)
+            # The caller can decide if this is acceptable
             
             return translated_text
             

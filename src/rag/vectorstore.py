@@ -240,8 +240,22 @@ class FAISSVectorStore:
     
     def clear(self):
         """Clear all vectors (use with caution)"""
+        # Delete index files from disk
+        try:
+            if self.index_file.exists():
+                self.index_file.unlink()
+                print(f"✅ Deleted index file: {self.index_file}")
+            if self.metadata_file.exists():
+                self.metadata_file.unlink()
+                print(f"✅ Deleted metadata file: {self.metadata_file}")
+        except Exception as e:
+            print(f"⚠️  Failed to delete index files: {e}")
+        
+        # Reset in-memory index and metadata
         self.index = faiss.IndexFlatIP(self.embedding_dim)
         self.metadata = []
+        
+        # Save empty index to ensure consistency
         self._save_index()
         print(f"✅ Cleared vector store for user {self.user_id}")
     

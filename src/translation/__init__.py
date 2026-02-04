@@ -63,6 +63,11 @@ try:
 except ImportError:
     LLMRefiner = None
 
+try:
+    from src.translation.semantic_translator import SemanticTranslator
+except ImportError:
+    SemanticTranslator = None
+
 __all__ = [
     'TranslationService',
     'TranslationGranularity',
@@ -80,5 +85,7 @@ __all__ = [
     'TextNormalizer',
     'RobustTranslator',
     'RobustTranscriptionTranslationIntegration',
-    'LLMRefiner'
+    'LLMRefiner',
+    # Semantic translation
+    'SemanticTranslator'
 ]

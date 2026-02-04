@@ -90,7 +90,10 @@ class TTSSynthesizer:
         # Ensure directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        if self.tts_engine == "gtts":
+        # For WAV format, prefer pyttsx3 if available (direct WAV output, no conversion needed)
+        if output_format.lower() == "wav" and self.pyttsx3_available:
+            return self._synthesize_pyttsx3(text, language, output_path, output_format)
+        elif self.tts_engine == "gtts":
             return self._synthesize_gtts(text, language, output_path, output_format, slow)
         else:
             return self._synthesize_pyttsx3(text, language, output_path, output_format)
@@ -115,21 +118,44 @@ class TTSSynthesizer:
             if output_format.lower() == "mp3":
                 tts.save(str(output_path))
             elif output_format.lower() == "wav":
-                # gTTS outputs MP3, need to convert to WAV
+                # gTTS outputs MP3, need to convert to WAV using ffmpeg
                 import tempfile
-                import pydub
+                import subprocess
                 
                 # Save to temporary MP3 first
                 temp_mp3 = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
                 tts.save(temp_mp3.name)
                 temp_mp3.close()
                 
-                # Convert MP3 to WAV
-                audio = pydub.AudioSegment.from_mp3(temp_mp3.name)
-                audio.export(str(output_path), format="wav")
-                
-                # Clean up temp file
-                Path(temp_mp3.name).unlink()
+                try:
+                    # Use ffmpeg directly for conversion (doesn't require audioop/pydub)
+                    subprocess.run(
+                        ['ffmpeg', '-i', temp_mp3.name, '-y', str(output_path)],
+                        check=True,
+                        capture_output=True,
+                        timeout=30
+                    )
+                    Path(temp_mp3.name).unlink()
+                except FileNotFoundError:
+                    Path(temp_mp3.name).unlink()
+                    # Fallback to pyttsx3 if available
+                    if hasattr(self, 'pyttsx3_available') and self.pyttsx3_available:
+                        print("⚠️  ffmpeg not found, falling back to pyttsx3 for direct WAV support")
+                        return self._synthesize_pyttsx3(text, language, output_path, output_format)
+                    raise TranscriptionError(
+                        "ffmpeg not found. Please install ffmpeg:\n"
+                        "Windows: Download from https://ffmpeg.org/download.html\n"
+                        "Linux: sudo apt-get install ffmpeg\n"
+                        "macOS: brew install ffmpeg\n"
+                        "Or use MP3 format instead."
+                    )
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                    Path(temp_mp3.name).unlink()
+                    # Fallback to pyttsx3 if available
+                    if hasattr(self, 'pyttsx3_available') and self.pyttsx3_available:
+                        print("⚠️  WAV conversion with ffmpeg failed, falling back to pyttsx3 for direct WAV support")
+                        return self._synthesize_pyttsx3(text, language, output_path, output_format)
+                    raise TranscriptionError(f"WAV conversion failed: {str(e)}")
             else:
                 raise TranscriptionError(f"Unsupported output format: {output_format}")
             
@@ -171,9 +197,9 @@ class TTSSynthesizer:
                 engine.save_to_file(text, str(output_path))
                 engine.runAndWait()
             elif output_format.lower() == "mp3":
-                # pyttsx3 outputs WAV, need to convert to MP3
+                # pyttsx3 outputs WAV, need to convert to MP3 using ffmpeg
                 import tempfile
-                import pydub
+                import subprocess
                 
                 # Save to temporary WAV first
                 temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
@@ -183,12 +209,27 @@ class TTSSynthesizer:
                 engine.save_to_file(text, temp_wav_path)
                 engine.runAndWait()
                 
-                # Convert WAV to MP3
-                audio = pydub.AudioSegment.from_wav(temp_wav_path)
-                audio.export(str(output_path), format="mp3")
-                
-                # Clean up temp file
-                Path(temp_wav_path).unlink()
+                try:
+                    # Convert WAV to MP3 using ffmpeg (doesn't require audioop/pydub)
+                    subprocess.run(
+                        ['ffmpeg', '-i', temp_wav_path, '-y', str(output_path)],
+                        check=True,
+                        capture_output=True,
+                        timeout=30
+                    )
+                    Path(temp_wav_path).unlink()
+                except FileNotFoundError:
+                    Path(temp_wav_path).unlink()
+                    raise TranscriptionError(
+                        "ffmpeg not found. Please install ffmpeg:\n"
+                        "Windows: Download from https://ffmpeg.org/download.html\n"
+                        "Linux: sudo apt-get install ffmpeg\n"
+                        "macOS: brew install ffmpeg\n"
+                        "Or use WAV format instead (pyttsx3 supports WAV directly)."
+                    )
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                    Path(temp_wav_path).unlink()
+                    raise TranscriptionError(f"MP3 conversion failed: {str(e)}")
             else:
                 raise TranscriptionError(f"Unsupported output format: {output_format}")
             

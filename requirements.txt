@@ -28,7 +28,7 @@ webvtt-py>=0.4.6
 # Export & TTS
 gtts>=2.4.0
 pyttsx3>=2.90
-pydub>=0.25.1
+pydub>=0.25.1  # Optional: Used for some audio processing (WAV conversion now uses ffmpeg directly)
 
 # Database & Storage
 sqlalchemy>=2.0.23
@@ -38,9 +38,14 @@ sentence-transformers>=2.2.2
 faiss-cpu>=1.7.4
 # Alternative: chromadb>=0.4.15
 
+# LangChain for Advanced RAG
+langchain>=0.1.0
+langchain-core>=0.1.0
+
 # API Framework (Optional)
 fastapi>=0.104.1
 uvicorn>=0.24.0
+aiofiles>=23.2.1
 
 # Utilities
 pydantic>=2.5.0

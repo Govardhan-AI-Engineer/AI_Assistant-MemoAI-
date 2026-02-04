@@ -168,9 +168,16 @@ class RAGQAEngine:
                     'end': None
                 })
         
-        # Add paragraphs if no notes or as fallback
-        if not notes or not prefer_notes:
+        # CRITICAL: Always index transcript text (even if notes exist)
+        # Split transcript text into chunks for better retrieval
+        transcript_text = transcript.get('text', '')
+        if transcript_text and transcript_text.strip():
+            # Split into sentences/chunks for better granularity
+            # Use paragraphs if available, otherwise split by sentences
             paragraphs = transcript.get('paragraphs', [])
+            
+            if paragraphs:
+                # Use existing paragraphs
             for para in paragraphs:
                 text = para.get('text', '')
                 if text and text.strip():
@@ -184,6 +191,36 @@ class RAGQAEngine:
                         'end': para.get('end'),
                         'language': transcript.get('language', 'en')
                     })
+            else:
+                # No paragraphs - split transcript text into chunks
+                # Split by sentences (roughly 2-3 sentences per chunk)
+                import re
+                sentences = re.split(r'([.!?।॥]\s+)', transcript_text)
+                
+                current_chunk = []
+                chunk_size = 0
+                max_chunk_size = 1000  # Increased from 500 to 1000 for better fact preservation
+                
+                for i, part in enumerate(sentences):
+                    current_chunk.append(part)
+                    chunk_size += len(part)
+                    
+                    # If chunk is large enough or we hit a sentence end, save it
+                    if (chunk_size >= max_chunk_size and part.strip().endswith(('.', '!', '?', '।', '॥'))) or i == len(sentences) - 1:
+                        chunk_text = ''.join(current_chunk).strip()
+                        if chunk_text:
+                            texts_to_index.append(chunk_text)
+                            metadata_list.append({
+                                'text': chunk_text,
+                                'transcript_id': transcript_id,
+                                'document_id': transcript.get('document_id'),
+                                'type': 'transcript_chunk',
+                                'start': None,
+                                'end': None,
+                                'language': transcript.get('language', 'en')
+                            })
+                        current_chunk = []
+                        chunk_size = 0
         
         if not texts_to_index:
             print(f"⚠️  No content to index for transcript {transcript_id}")
@@ -248,8 +285,8 @@ class RAGQAEngine:
     def query(
         self,
         question: str,
-        top_k: int = 5,
-        min_similarity: float = 0.3,
+        top_k: int = 10,  # Increased from 5 to 10 for better fact coverage
+        min_similarity: float = 0.2,  # Lower default for better multilingual support
         include_citations: bool = True,
         use_advanced: Optional[bool] = None
     ) -> Dict[str, Any]:
@@ -306,10 +343,10 @@ class RAGQAEngine:
             # Use hybrid search (semantic + keyword)
             results = self.hybrid_search.search(
                 query=question,
-                top_k=top_k * 2,  # Get more for re-ranking
+                top_k=top_k * 3,  # Get more for better multilingual matching
                 semantic_weight=0.7,
                 keyword_weight=0.3,
-                min_score=min_similarity
+                min_score=min_similarity * 0.7  # More lenient for multilingual
             )
             search_method = 'hybrid'
         else:
@@ -317,7 +354,7 @@ class RAGQAEngine:
             query_embedding = self.embedder.embed_text(question)
             results = self.vectorstore.search(
                 query_embedding=query_embedding,
-                k=top_k * 2
+                k=top_k * 3  # Get more results for better matching
             )
             search_method = 'semantic'
         
@@ -333,11 +370,28 @@ class RAGQAEngine:
                 results = reranked_candidates + other_results
                 results.sort(key=lambda x: x[1], reverse=True)
         
-        # Filter by similarity threshold
+        # Filter by similarity threshold - more lenient for multilingual
+        if results:
+            # For multilingual/cross-lingual queries, use a more lenient threshold
+            # Cross-lingual semantic similarity can be lower but still relevant
+            base_threshold = min_similarity
+            multilingual_threshold = base_threshold * 0.7  # 30% more lenient
+            
         filtered_results = [
             (meta, score) for meta, score in results
-            if score >= min_similarity
-        ] if results else []
+                if score >= multilingual_threshold
+            ]
+            
+            # If still no results but we have some, use top results anyway
+            if not filtered_results and results:
+                # Use top results even if slightly below threshold
+                # This helps with cross-lingual matching
+                filtered_results = results[:top_k]
+                if filtered_results:
+                    top_score = filtered_results[0][1] if filtered_results else 0
+                    print(f"📊 Using lenient threshold for multilingual matching. Top score: {top_score:.3f}")
+        else:
+            filtered_results = []
         
         # Early exit optimization: If no results found, skip remaining steps
         if not filtered_results:
@@ -375,20 +429,38 @@ class RAGQAEngine:
         # Step 4: Check if context is relevant
         # First check if it's a greeting/short query (should use general knowledge)
         question_lower = original_question.lower().strip()
-        short_greetings = {'hi', 'hey', 'hello', 'bye', 'thanks', 'thank you', 'ok', 'okay', 'yes', 'no'}
+        short_greetings = {'hi', 'hey', 'hello', 'bye', 'thanks', 'thank you', 'ok', 'okay', 'yes', 'no',
+                          'नमस्ते', 'हैलो', 'धन्यवाद', 'ठीक', 'हाँ', 'नहीं',
+                          'నమస్కారం', 'హలో', 'ధన్యవాదాలు', 'సరే', 'అవును', 'కాదు'}
         is_greeting_or_short = len(question_lower) <= 3 or question_lower in short_greetings
         
         context_relevant = False
         if is_greeting_or_short:
             # Greetings/short queries should use general knowledge
             context_relevant = False
-        elif retrieved_chunks and use_advanced and self.refiner:
-            # Check relevance using refiner's method
+        elif retrieved_chunks and len(retrieved_chunks) > 0:
+            # CRITICAL FIX: If we have retrieved chunks, they're likely relevant
+            # Even if similarity is slightly low, use them for multilingual queries
+            # Semantic search already did the filtering
+            context_relevant = True  # Always consider relevant if chunks exist
+            
+            # Only do additional check if using advanced features AND similarity is very low
+            if use_advanced and self.refiner:
+                # Check average similarity of top results
+                avg_similarity = sum(score for _, score in filtered_results[:3]) / len(filtered_results[:3]) if filtered_results[:3] else 0
+                if avg_similarity < 0.15:
+                    # Very low similarity - do additional check
             context_relevant = self.refiner._check_context_relevance(
                 original_question,
                 retrieved_chunks,
                 min_similarity
             )
+                else:
+                    # Similarity is reasonable - trust semantic search
+                    context_relevant = True
+            else:
+                # If we have chunks above similarity threshold, consider relevant
+                context_relevant = True
         elif filtered_results:
             # Fallback: if we have results above threshold, consider relevant
             context_relevant = True
@@ -398,40 +470,45 @@ class RAGQAEngine:
         answer = None
         refinement_method = 'none'
         
-        if context_relevant:
+        if context_relevant and retrieved_chunks:
             # Context is relevant - answer from context
+            # CRITICAL: Always try to generate answer from context if chunks exist
             if use_advanced and self.refiner:
                 refined = self.refiner.refine_answer(
                     question=original_question,
-                    retrieved_chunks=retrieved_chunks[:5],
+                    retrieved_chunks=retrieved_chunks[:15],  # Increased from 8 to 15 for better coverage
                     language=query_lang,
                     min_relevance=min_similarity
                 )
                 
-                if refined.get('context_relevant', False) and refined.get('refined_answer'):
+                if refined.get('refined_answer'):
                     answer = refined['refined_answer']
-                    refinement_method = refined['method']
+                    refinement_method = refined.get('method', 'langchain')  # Prefer LangChain
                     is_from_context = True
+                    context_relevant = refined.get('context_relevant', True)
                 else:
-                    # Context not relevant enough
-                    context_relevant = False
+                    # Refiner didn't produce answer - use simple method
+                    context_relevant = True  # Keep trying with simple method
             
-            if not answer and context_relevant:
+            if not answer and context_relevant and retrieved_chunks:
                 # Simple answer construction from context
                 answer_parts = []
                 for meta in retrieved_chunks[:3]:
                     chunk_text = meta.get('text', '')
+                    if not chunk_text or not chunk_text.strip():
+                        continue
+                    
                     chunk_lang = meta.get('language', 'en')
                     
                     # Translate if needed
                     if chunk_lang != query_lang and self.translation_service:
                         try:
-                            translated = self.translation_service.translate(
+                            translated = self.translation_service.translate_text(
                                 text=chunk_text,
-                                target_language=query_lang,
-                                source_language=chunk_lang
+                                source_language=chunk_lang,
+                                target_language=query_lang
                             )
-                            answer_parts.append(translated.get('translated_text', chunk_text))
+                            answer_parts.append(translated)
                         except Exception:
                             answer_parts.append(chunk_text)
                     else:

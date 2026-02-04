@@ -114,15 +114,10 @@ function Dashboard({ user, onLogout }) {
               className={`sidebar-item ${activeTab === 'transcribe' && (activeSubTab === 'notes' || activeSubTab === 'tags') ? 'active' : ''}`}
               onClick={() => {
                 setActiveTab('transcribe')
-                // Use selectedTranscript if available, otherwise use currentTranscript
-                const transcriptToUse = selectedTranscript || currentTranscript
-                // If we have a transcript, switch to notes tab, otherwise stay on transcription
-                if (transcriptToUse) {
-                  setCurrentTranscript(transcriptToUse)
-                  setActiveSubTab('notes')
-                } else {
-                  setActiveSubTab('transcription')
-                }
+                // Always route to notes tab - NotesPanel has its own transcript selector
+                setActiveSubTab('notes')
+                // Preserve currentTranscript if it exists, but NotesPanel can work without it
+                // NotesPanel will show transcript selector if no transcript is selected
               }}
             >
               <span className="sidebar-icon">📋</span>
@@ -148,27 +143,25 @@ function Dashboard({ user, onLogout }) {
                   Transcription
                 </button>
                 {currentTranscript && (
-                  <>
-                    <button 
-                      className={`sub-nav-tab ${activeSubTab === 'translation' ? 'active' : ''}`}
-                      onClick={() => setActiveSubTab('translation')}
-                    >
-                      Translation
-                    </button>
-                    <button 
-                      className={`sub-nav-tab ${activeSubTab === 'notes' ? 'active' : ''}`}
-                      onClick={() => setActiveSubTab('notes')}
-                    >
-                      Notes
-                    </button>
-                    <button 
-                      className={`sub-nav-tab ${activeSubTab === 'tags' ? 'active' : ''}`}
-                      onClick={() => setActiveSubTab('tags')}
-                    >
-                      Tags
-                    </button>
-                  </>
+                  <button 
+                    className={`sub-nav-tab ${activeSubTab === 'translation' ? 'active' : ''}`}
+                    onClick={() => setActiveSubTab('translation')}
+                  >
+                    Translation
+                  </button>
                 )}
+                <button 
+                  className={`sub-nav-tab ${activeSubTab === 'notes' ? 'active' : ''}`}
+                  onClick={() => setActiveSubTab('notes')}
+                >
+                  Notes
+                </button>
+                <button 
+                  className={`sub-nav-tab ${activeSubTab === 'tags' ? 'active' : ''}`}
+                  onClick={() => setActiveSubTab('tags')}
+                >
+                  Tags
+                </button>
               </>
             )}
             {activeTab === 'transcripts' && (
@@ -251,29 +244,40 @@ function Dashboard({ user, onLogout }) {
                       // Update currentTranscript with selected language for NotesPanel and ExportButton
                       setCurrentTranscript({ ...currentTranscript, selectedLanguage: lang, targetLanguage: lang })
                     }}
+                    onNavigateToNotes={(targetLang) => {
+                      // Update transcript with target language and switch to notes tab
+                      setCurrentTranscript({ 
+                        ...currentTranscript, 
+                        selectedLanguage: targetLang, 
+                        targetLanguage: targetLang 
+                      })
+                      setActiveSubTab('notes')
+                    }}
                   />
                 )}
-                {activeSubTab === 'notes' && currentTranscript && (
+                {activeSubTab === 'notes' && (
                   <NotesPanel
                     user={user}
-                    transcriptId={currentTranscript.id || currentTranscript.transcript_id}
-                    targetLanguage={currentTranscript.selectedLanguage || null}
+                    transcriptId={currentTranscript?.id || currentTranscript?.transcript_id || null}
+                    targetLanguage={currentTranscript?.selectedLanguage || null}
+                    onTranscriptSelect={(transcript) => {
+                      setCurrentTranscript(transcript)
+                    }}
                   />
                 )}
-                {activeSubTab === 'tags' && currentTranscript && (
+                {activeSubTab === 'tags' && (
                   <TagsPanel
                     user={user}
-                    transcriptId={currentTranscript.id || currentTranscript.transcript_id}
+                    transcriptId={currentTranscript?.id || currentTranscript?.transcript_id || null}
                     onTagsUpdate={() => {}}
+                    onTranscriptSelect={(transcript) => {
+                      setCurrentTranscript(transcript)
+                    }}
                   />
                 )}
-                {!currentTranscript && activeSubTab !== 'transcription' && (
+                {!currentTranscript && activeSubTab === 'translation' && (
                   <div style={{ padding: '2rem', textAlign: 'center', color: '#666' }}>
-                    <p>
-                      {activeSubTab === 'notes' && 'Please transcribe a file or select a transcript to view and generate notes.'}
-                      {activeSubTab === 'tags' && 'Please transcribe a file or select a transcript to manage tags.'}
-                      {activeSubTab === 'translation' && 'Please transcribe a file first to access translation features.'}
-                    </p>
+                    <p>Please transcribe a file first to access translation features.</p>
                     <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center', marginTop: '1rem' }}>
                       <button 
                         onClick={() => setActiveSubTab('transcription')}
@@ -288,20 +292,6 @@ function Dashboard({ user, onLogout }) {
                         }}
                       >
                         Go to Transcription
-                      </button>
-                      <button 
-                        onClick={() => setActiveTab('transcripts')}
-                        style={{
-                          padding: '0.5rem 1rem',
-                          background: '#EC7625',
-                          color: 'white',
-                          border: 'none',
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                          fontFamily: 'Helvetica, Arial, sans-serif'
-                        }}
-                      >
-                        Select Transcript
                       </button>
                     </div>
                   </div>
@@ -363,7 +353,16 @@ function Dashboard({ user, onLogout }) {
                         >
                           Translate
                         </button>
-                        <button className="action-btn">View Notes</button>
+                        <button 
+                          className="action-btn"
+                          onClick={() => {
+                            setCurrentTranscript(selectedTranscript)
+                            setActiveTab('transcribe')
+                            setActiveSubTab('notes')
+                          }}
+                        >
+                          View Notes
+                        </button>
                       </div>
                       <div className="export-actions">
                         <h5>Export Options</h5>

@@ -4,19 +4,36 @@ import './TagsPanel.css'
 
 const API_URL = 'http://localhost:8000'
 
-function TagsPanel({ user, transcriptId, onTagsUpdate }) {
+function TagsPanel({ user, transcriptId, onTagsUpdate, onTranscriptSelect = null }) {
   const [tags, setTags] = useState([])
   const [transcriptTags, setTranscriptTags] = useState([])
   const [newTagName, setNewTagName] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [transcripts, setTranscripts] = useState([])
+  const [selectedTranscriptId, setSelectedTranscriptId] = useState(transcriptId || null)
+  const [loadingTranscripts, setLoadingTranscripts] = useState(false)
+
+  // Load transcripts list on mount
+  useEffect(() => {
+    loadTranscripts()
+  }, [])
+
+  // Update selected transcript when prop changes
+  useEffect(() => {
+    if (transcriptId) {
+      setSelectedTranscriptId(transcriptId)
+    }
+  }, [transcriptId])
 
   useEffect(() => {
     loadTags()
-    if (transcriptId) {
+    if (selectedTranscriptId) {
       loadTranscriptTags()
+    } else {
+      setTranscriptTags([])
     }
-  }, [transcriptId])
+  }, [selectedTranscriptId])
 
   const loadTags = async () => {
     try {
@@ -32,18 +49,61 @@ function TagsPanel({ user, transcriptId, onTagsUpdate }) {
     }
   }
 
-  const loadTranscriptTags = async () => {
+  const loadTranscripts = async () => {
     try {
-      const response = await axios.get(`${API_URL}/api/transcripts/${transcriptId}/tags`, {
+      setLoadingTranscripts(true)
+      const response = await axios.get(`${API_URL}/api/transcripts`, {
+        params: {
+          user_id: user.user_id,
+          limit: 100
+        }
+      })
+      setTranscripts(response.data.transcripts || [])
+    } catch (err) {
+      console.error('Failed to load transcripts:', err)
+    } finally {
+      setLoadingTranscripts(false)
+    }
+  }
+
+  const loadTranscriptTags = async () => {
+    if (!selectedTranscriptId) {
+      setTranscriptTags([])
+      return
+    }
+
+    try {
+      const response = await axios.get(`${API_URL}/api/transcripts/${selectedTranscriptId}/tags`, {
         params: { user_id: user.user_id }
       })
-      // This would need backend to return actual transcript tags
-      // For now, we'll manage it in frontend
       setTranscriptTags(response.data.transcript_tags || [])
     } catch (err) {
       console.error('Failed to load transcript tags:', err)
       setTranscriptTags([])
     }
+  }
+
+  const handleTranscriptSelect = (e) => {
+    const newTranscriptId = parseInt(e.target.value)
+    setSelectedTranscriptId(newTranscriptId)
+    setTranscriptTags([]) // Clear tags when transcript changes
+    
+    // Notify parent if callback provided
+    if (onTranscriptSelect && newTranscriptId) {
+      const selectedTranscript = transcripts.find(t => t.id === newTranscriptId)
+      if (selectedTranscript) {
+        onTranscriptSelect(selectedTranscript)
+      }
+    }
+  }
+
+  const formatTranscriptName = (transcript) => {
+    let name = transcript.source_file || transcript.source_url || 'Untitled'
+    if (name.includes('/') || name.includes('\\')) {
+      name = name.split(/[/\\]/).pop()
+    }
+    name = name.replace(/\.[^/.]+$/, '')
+    return name || 'Untitled Transcript'
   }
 
   const createTag = async (e) => {
@@ -64,12 +124,15 @@ function TagsPanel({ user, transcriptId, onTagsUpdate }) {
   }
 
   const addTagToTranscript = async (tagId) => {
-    if (!transcriptId) return
+    if (!selectedTranscriptId) {
+      setError('Please select a transcript first')
+      return
+    }
 
     try {
       const formData = new FormData()
       formData.append('user_id', user.user_id)
-      formData.append('transcript_id', transcriptId)
+      formData.append('transcript_id', selectedTranscriptId)
       formData.append('tag_id', tagId)
 
       await axios.post(`${API_URL}/api/tags/transcript`, formData)
@@ -82,10 +145,10 @@ function TagsPanel({ user, transcriptId, onTagsUpdate }) {
   }
 
   const removeTagFromTranscript = async (tagId) => {
-    if (!transcriptId) return
+    if (!selectedTranscriptId) return
 
     try {
-      await axios.delete(`${API_URL}/api/transcripts/${transcriptId}/tags/${tagId}`, {
+      await axios.delete(`${API_URL}/api/transcripts/${selectedTranscriptId}/tags/${tagId}`, {
         params: { user_id: user.user_id }
       })
       await loadTranscriptTags()
@@ -114,18 +177,26 @@ function TagsPanel({ user, transcriptId, onTagsUpdate }) {
     }
   }
 
-  if (!transcriptId) {
-    return (
-      <div className="tags-panel">
-        <p>Select a transcript to manage tags.</p>
-      </div>
-    )
-  }
-
   return (
     <div className="tags-panel">
       <div className="tags-header">
         <h3>🏷️ Tags</h3>
+        <div className="transcript-selector" style={{ marginTop: '1rem' }}>
+          <label>Select Transcript:</label>
+          <select
+            value={selectedTranscriptId || ''}
+            onChange={handleTranscriptSelect}
+            disabled={loadingTranscripts}
+            style={{ marginLeft: '0.5rem', padding: '0.25rem 0.5rem' }}
+          >
+            <option value="">-- Select a transcript --</option>
+            {transcripts.map((transcript) => (
+              <option key={transcript.id} value={transcript.id}>
+                {formatTranscriptName(transcript)} ({transcript.language || 'auto'})
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {error && <div className="error">{error}</div>}

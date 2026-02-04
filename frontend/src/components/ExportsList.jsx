@@ -115,10 +115,10 @@ function ExportsList({ user, transcriptId = null, filterType: propFilterType = '
       let url
       // Use ID if available (database entry), otherwise use file path
       if (exportItem.id) {
-        url = `${API_URL}/api/exports/${exportItem.id}/download?user_id=${user.user_id}`
+        url = `${API_URL}/api/exports/${exportItem.id}/download?user_id=${user.user_id}&force_download=true`
       } else {
         // File not in database, use path-based download
-        url = `${API_URL}/api/exports/file/${encodeURIComponent(exportItem.file_path)}/download?user_id=${user.user_id}`
+        url = `${API_URL}/api/exports/file/${encodeURIComponent(exportItem.file_path)}/download?user_id=${user.user_id}&force_download=true`
       }
       
       const response = await axios.get(url, { responseType: 'blob' })

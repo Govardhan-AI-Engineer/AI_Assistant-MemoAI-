@@ -13,9 +13,9 @@ function NoteContentModal({ note, isOpen, onClose }) {
         </div>
         <div className="modal-body">
           {note.note_type === 'key_points' ? (
-            <FormattedKeyPoints content={note.translated_content || note.content} />
+            <FormattedKeyPoints content={note.content} />
           ) : (
-            <div className="note-content-text">{note.translated_content || note.content}</div>
+            <div className="note-content-text">{note.content}</div>
           )}
         </div>
         <div className="modal-footer">
