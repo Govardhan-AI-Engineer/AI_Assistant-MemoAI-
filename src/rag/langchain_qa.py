@@ -208,13 +208,20 @@ Write a clear, comprehensive, natural answer in {lang_name}. Include ALL relevan
         # Universal user template (works for all languages)
         user_template = """Question (in {language}): {{question}}
 
-Context: {{context}}
+Context (MULTIPLE SOURCES - USE ALL OF THEM): {{context}}
 
-CRITICAL INSTRUCTION: If the question asks about "changes", "impacts", "developments", "what happened", or "what are described", you MUST list ALL of them mentioned in the context. Do not summarize - extract and list every single change, fact, development, or detail mentioned. Be exhaustive and comprehensive.
+CRITICAL INSTRUCTION - USE ALL CHUNKS:
+- You have MULTIPLE context chunks above (marked as [Source 1], [Source 2], etc.)
+- You MUST synthesize information from ALL chunks, not just one
+- If multiple chunks mention different methods/tips/ways, include ALL of them
+- Synthesize and combine information from ALL chunks into a comprehensive answer
+- Do NOT just use the first chunk - use information from ALL relevant chunks
+
+CRITICAL INSTRUCTION: If the question asks about "how to", "ways to", "methods to", "changes", "impacts", "developments", "what happened", or "what are described", you MUST list ALL of them mentioned across ALL context chunks. Do not summarize - extract and list every single method, tip, way, change, fact, development, or detail mentioned. Be exhaustive and comprehensive. Synthesize information from ALL chunks.
 
 IMPORTANT: Answer in {language} language ONLY. The question is in {language}, so your answer must be in {language}.
 
-Provide a clear, comprehensive answer using ONLY information from the context. Extract and include ALL relevant information from the context. If the question asks for "changes", "impacts", "facts", "details", or "what are described", include ALL of them mentioned in the context. Write naturally in continuous prose sentences, connecting all relevant points. Do NOT use numbered lists (1., 2., 3.) or bullet points. Be thorough and include all relevant information. Answer in {language}.""".format(language=lang_name)
+Provide a clear, comprehensive answer using ONLY information from the context. Extract and synthesize information from ALL context chunks. If multiple chunks mention different methods/tips/ways, include ALL of them. Write naturally in continuous prose sentences, connecting all relevant points from multiple chunks. Do NOT use numbered lists (1., 2., 3.) or bullet points. Be thorough and include all relevant information from ALL chunks. Answer in {language}.""".format(language=lang_name)
         
         return system_prompt, user_template
     

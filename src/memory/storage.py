@@ -72,14 +72,63 @@ class StorageService:
         Returns:
             Dictionary with document_id and transcript data
         """
+        # CRITICAL: Language validation MUST happen BEFORE any database operation
+        # This ensures language is NEVER None when creating Transcript object
+        # For subtitle files (source_type='subtitle'), default to 'en' if not provided
+        
+        # Step 1: Convert to string and handle None
+        if language is None:
+            language = None
+        else:
+            language = str(language).strip()
+        
+        # Step 2: Validate and set default if invalid
+        if not language or language == '' or language.lower() in ('none', 'auto', 'null'):
+            # For subtitle files, default to 'en' immediately (no detection needed)
+            if source_type == 'subtitle':
+                language = 'en'
+                print(f"✓ Subtitle file: using default language 'en' (no language metadata in subtitle files)")
+            else:
+                # For other files, try to detect from text
+                try:
+                    from src.rag.embeddings import MultilingualEmbedder
+                    embedder = MultilingualEmbedder()
+                    if text and text.strip():
+                        language = embedder.detect_language(text)
+                        print(f"✓ Auto-detected language in save_transcript: {language}")
+                    else:
+                        language = 'en'
+                except Exception as e:
+                    print(f"⚠️  Language detection failed in save_transcript: {e}, using 'en'")
+                    language = 'en'  # Safe default
+        
+        # Step 3: Final guarantee - language MUST be a non-empty string
+        language = str(language).strip() if language else 'en'
+        if not language or language.lower() in ('none', 'null', ''):
+            language = 'en'
+        
+        # Step 4: Assert language is valid (defensive check)
+        assert language and language.strip() != '', f"Language validation failed: language={repr(language)}"
+        
+        print(f"💾 save_transcript: language={language}, source_type={source_type}, text_length={len(text) if text else 0}")
+        
         db: Session = self.SessionLocal()
         try:
             # Generate unique document ID if not provided
             if not document_id:
                 document_id = self._generate_document_id()
-                # Ensure uniqueness
+                # Ensure uniqueness (retry up to 10 times)
+                max_retries = 10
+                retry_count = 0
                 while db.query(Transcript).filter(Transcript.document_id == document_id).first():
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        raise ValueError("Failed to generate unique document ID after multiple attempts")
                     document_id = self._generate_document_id()
+            
+            # For subtitle files, check if we should allow duplicates or skip
+            # (Subtitle files can be re-uploaded for translation, so allow duplicates)
+            # But ensure document_id is always unique
             
             # Create new transcript (never overwrite existing)
             transcript = Transcript(
@@ -106,11 +155,82 @@ class StorageService:
                 'created_at': transcript.created_at.isoformat() if transcript.created_at else None
             }
             
-        except IntegrityError:
+        except IntegrityError as e:
             db.rollback()
-            raise ValueError(f"Document ID {document_id} already exists")
+            error_str = str(e).lower()
+            
+            # CRITICAL: Separate NOT NULL constraint errors from document_id collisions
+            # NOT NULL errors indicate a validation problem (language=None) - don't retry, raise immediately
+            if 'not null' in error_str and 'language' in error_str:
+                # This should NEVER happen if validation above worked correctly
+                # But if it does, it means language validation failed - raise clear error
+                print(f"❌ CRITICAL: Language validation failed! language={language}, text_length={len(text) if text else 0}")
+                raise ValueError(
+                    f"Language cannot be NULL. Validation failed. "
+                    f"This indicates a bug in language validation logic. "
+                    f"Language value was: {repr(language)}"
+                )
+            
+            # Only retry for actual document_id collisions (unique constraint violations)
+            if 'document_id' in error_str or ('unique' in error_str and 'document_id' in error_str):
+                try:
+                    # Generate new document_id and retry
+                    new_document_id = self._generate_document_id()
+                    max_retries = 10
+                    retry_count = 0
+                    while db.query(Transcript).filter(Transcript.document_id == new_document_id).first():
+                        retry_count += 1
+                        if retry_count >= max_retries:
+                            raise ValueError("Failed to generate unique document ID after multiple attempts")
+                        new_document_id = self._generate_document_id()
+                    
+                    # Use the already-validated language (should never be None at this point)
+                    retry_language = language
+                    
+                    # Final safety check (should not be needed, but defensive programming)
+                    if not retry_language or str(retry_language).strip() == '' or str(retry_language).lower() == 'none':
+                        retry_language = 'en'
+                    retry_language = str(retry_language).strip()
+                    
+                    print(f"🔄 Retry (document_id collision): language={retry_language}, source_type={source_type}, document_id={new_document_id}")
+                    
+                    # Retry with new document_id
+                    transcript = Transcript(
+                        document_id=new_document_id,
+                        user_id=user_id,
+                        source_file=source_file,
+                        source_url=source_url,
+                        source_type=source_type,
+                        text=text,
+                        language=retry_language,  # Guaranteed to be valid
+                        model_used=model_used,
+                        paragraphs=paragraphs or [],
+                        segments=segments or []
+                    )
+                    
+                    db.add(transcript)
+                    db.commit()
+                    db.refresh(transcript)
+                    
+                    return {
+                        'document_id': transcript.document_id,
+                        'id': transcript.id,
+                        'user_id': transcript.user_id,
+                        'created_at': transcript.created_at.isoformat() if transcript.created_at else None
+                    }
+                except Exception as retry_error:
+                    print(f"❌ Retry failed: {retry_error}")
+                    import traceback
+                    traceback.print_exc()
+                    raise ValueError(f"Document ID collision and retry failed: {str(retry_error)}")
+            else:
+                # Other integrity errors (foreign key, etc.) - don't retry
+                raise ValueError(f"Database integrity error: {str(e)}")
         except Exception as e:
             db.rollback()
+            print(f"❌ save_transcript error: {e}")
+            import traceback
+            traceback.print_exc()
             raise Exception(f"Failed to save transcript: {str(e)}")
         finally:
             db.close()
@@ -560,7 +680,7 @@ class StorageService:
         transcript_id: int
     ) -> bool:
         """
-        Delete a transcript and all related data (translations, notes, tags)
+        Delete a transcript and all related data (translations, notes, tags, export files)
         
         Args:
             user_id: User ID
@@ -569,6 +689,7 @@ class StorageService:
         Returns:
             True if successful, False otherwise
         """
+        import os
         db: Session = self.SessionLocal()
         try:
             # Get transcript and verify ownership
@@ -579,6 +700,23 @@ class StorageService:
             if not transcript:
                 return False
             
+            # Delete associated export files (both database records and physical files)
+            export_files = db.query(ExportFile).filter(
+                and_(ExportFile.transcript_id == transcript_id, ExportFile.user_id == user_id)
+            ).all()
+            
+            for export_file in export_files:
+                # Delete physical file if it exists
+                file_path = Config.EXPORTS_DIR / export_file.file_path
+                if file_path.exists() and file_path.is_file():
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        print(f"Warning: Failed to delete export file {file_path}: {e}")
+                
+                # Delete database record
+                db.delete(export_file)
+            
             # Delete transcript (cascade will handle translations, notes, tags)
             db.delete(transcript)
             db.commit()
@@ -586,6 +724,8 @@ class StorageService:
         except Exception as e:
             db.rollback()
             print(f"Error deleting transcript: {e}")
+            import traceback
+            traceback.print_exc()
             return False
         finally:
             db.close()
@@ -668,6 +808,108 @@ class StorageService:
         except Exception as e:
             print(f"Error deleting export file by path: {e}")
             return False
+    
+    def save_subtitle_transcript(
+        self,
+        user_id: int,
+        text: str,
+        segments: List[Dict],
+        source_file: str,
+        language: Optional[str] = None,
+        name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Save subtitle file as transcript - SUBTITLE-SPECIFIC HANDLER
+        
+        This function is ONLY for subtitle uploads (.srt/.vtt files).
+        It bypasses all audio/video transcription logic and ensures
+        language is ALWAYS set (defaults to 'en' if not provided).
+        
+        Args:
+            user_id: User ID (for isolation)
+            text: Extracted text from subtitle file
+            segments: List of subtitle segments with timestamps
+            source_file: Path to subtitle file
+            language: Language code (optional, defaults to 'en' if not provided)
+            name: Optional custom name for the transcript
+            
+        Returns:
+            Dictionary with document_id and transcript data
+            
+        Raises:
+            ValueError: If language cannot be determined (should never happen)
+        """
+        # CRITICAL: For subtitles, language MUST be set - default to 'en' if not provided
+        # Subtitle files don't contain language metadata, so we use a safe default
+        if not language or language.strip() == '' or language.lower() in ('none', 'null', 'auto'):
+            language = 'en'  # Safe default for subtitles
+        
+        # Ensure language is a valid string
+        language = str(language).strip()
+        if not language:
+            language = 'en'
+        
+        print(f"📝 save_subtitle_transcript: language={language} (guaranteed non-None), source_file={source_file}")
+        
+        db: Session = self.SessionLocal()
+        try:
+            # Generate unique document ID
+            document_id = self._generate_document_id()
+            max_retries = 10
+            retry_count = 0
+            while db.query(Transcript).filter(Transcript.document_id == document_id).first():
+                retry_count += 1
+                if retry_count >= max_retries:
+                    raise ValueError("Failed to generate unique document ID after multiple attempts")
+                document_id = self._generate_document_id()
+            
+            # Create transcript with subtitle-specific metadata
+            # CRITICAL: language is guaranteed to be 'en' or a valid language code (never None)
+            transcript = Transcript(
+                document_id=document_id,
+                user_id=user_id,
+                source_file=source_file,
+                source_url=None,
+                source_type="subtitle",  # Explicitly set as subtitle
+                text=text,
+                language=language,  # Guaranteed to be valid string, never None
+                model_used="subtitle_import",  # Indicates this came from subtitle file
+                paragraphs=[],  # Subtitles use segments, not paragraphs
+                segments=segments or []
+            )
+            
+            db.add(transcript)
+            db.commit()
+            db.refresh(transcript)
+            
+            return {
+                'document_id': transcript.document_id,
+                'id': transcript.id,
+                'user_id': transcript.user_id,
+                'created_at': transcript.created_at.isoformat() if transcript.created_at else None
+            }
+            
+        except IntegrityError as e:
+            db.rollback()
+            error_str = str(e).lower()
+            
+            # If language is None, this is a critical bug (should never happen)
+            if 'not null' in error_str and 'language' in error_str:
+                raise ValueError(
+                    f"CRITICAL BUG: Language validation failed in save_subtitle_transcript. "
+                    f"Language was: {repr(language)}. This should never happen."
+                )
+            
+            # For other integrity errors, raise without retry
+            raise ValueError(f"Database integrity error: {str(e)}")
+        except Exception as e:
+            db.rollback()
+            print(f"❌ save_subtitle_transcript error: {e}")
+            import traceback
+            traceback.print_exc()
+            raise Exception(f"Failed to save subtitle transcript: {str(e)}")
+        finally:
+            db.close()
     
     def delete_note(self, user_id: int, note_id: int) -> bool:
         """

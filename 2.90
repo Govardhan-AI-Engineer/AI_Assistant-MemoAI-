@@ -1,4 +1,0 @@
-Requirement already satisfied: pyttsx3 in c:\users\govardhanam\desktop\ai_media_assistant\myvenv\lib\site-packages (2.99)
-Requirement already satisfied: comtypes in c:\users\govardhanam\desktop\ai_media_assistant\myvenv\lib\site-packages (from pyttsx3) (1.4.15)
-Requirement already satisfied: pypiwin32 in c:\users\govardhanam\desktop\ai_media_assistant\myvenv\lib\site-packages (from pyttsx3) (223)
-Requirement already satisfied: pywin32 in c:\users\govardhanam\desktop\ai_media_assistant\myvenv\lib\site-packages (from pyttsx3) (311)

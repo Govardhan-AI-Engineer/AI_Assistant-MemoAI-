@@ -88,9 +88,9 @@ AI_Media_Assistant/
 
 ### **Task 4: Export & Output Module with Advanced RAG for QA**
 **Objective**: Generate multiple output formats, speech synthesis, and implement Advanced RAG for user question-answering
-
+  
 **Deliverables**:
-- SRT subtitle file generation
+- SRT subtitle file  
 - VTT subtitle file generation
 - Markdown export with formatting
 - Other documentation formats (TXT, JSON)

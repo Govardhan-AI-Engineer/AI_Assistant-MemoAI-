@@ -33,15 +33,17 @@ class AnswerRefiner:
         'sl': 'Slovenian', 'sr': 'Serbian'
     }
     
-    def __init__(self, use_llm: bool = True):
+    def __init__(self, use_llm: bool = True, embedder=None):
         """
         Initialize answer refiner
         
         Args:
             use_llm: Use LLM for refinement (default: True)
+            embedder: Optional MultilingualEmbedder for semantic similarity checks
         """
         self.use_llm = use_llm and GROQ_AVAILABLE
         self.groq_client = None
+        self.embedder = embedder  # Store embedder for semantic similarity checks
         
         if self.use_llm:
             try:
@@ -189,9 +191,13 @@ class AnswerRefiner:
     ) -> Dict[str, Any]:
         """Refine answer using LLM with improved prompts"""
         try:
-            # Prepare context from top chunks first (needed for validation)
+            # CRITICAL FIX: Filter chunks FIRST before preparing context
+            # This ensures irrelevant chunks are never included in the LLM context
+            filtered_chunks = self._filter_irrelevant_chunks(retrieved_chunks, question=question)
+            
+            # Prepare context from FILTERED chunks only
             context_parts = []
-            for i, chunk in enumerate(retrieved_chunks[:15]):  # Increased from 8 to 15 for better coverage
+            for i, chunk in enumerate(filtered_chunks[:15]):  # Use filtered chunks, not original
                 text = chunk.get('text', '')
                 if not text:
                     # Try alternative field names
@@ -206,14 +212,10 @@ class AnswerRefiner:
             
             # Debug: Log if context is empty
             if not context_parts:
-                print(f"⚠️  WARNING: No valid text found in retrieved chunks!")
-                print(f"   Chunks: {len(retrieved_chunks)}")
-                print(f"   Sample chunk keys: {list(retrieved_chunks[0].keys()) if retrieved_chunks else 'No chunks'}")
+                print(f"⚠️  WARNING: No valid text found in filtered chunks!")
+                print(f"   Original chunks: {len(retrieved_chunks)}, Filtered chunks: {len(filtered_chunks)}")
                 # Try simple fallback
-                return self._refine_simple(question, retrieved_chunks, language)
-            
-            # Filter chunks to remove noise/irrelevant content
-            filtered_chunks = self._filter_irrelevant_chunks(retrieved_chunks)
+                return self._refine_simple(question, filtered_chunks, language)
             
             # Try LangChain first if available
             try:
@@ -225,12 +227,16 @@ class AnswerRefiner:
                     context_parts = []
                     for chunk in filtered_chunks[:15]:
                         text = chunk.get('text', '') or chunk.get('content', '') or chunk.get('chunk_text', '')
-                if text:
+                        if text:
                             context_parts.append(text[:2000])
                     validation_context = '\n\n'.join(context_parts) if context_parts else context
                     # Clean and validate answer
                     answer = self._clean_answer_format(answer)
                     answer = self._validate_no_hallucination(answer, validation_context)
+                    # Remove sentences that don't answer the question
+                    answer = self._filter_irrelevant_sentences(answer, question, validation_context)
+                    # FINAL VALIDATION: Remove specific irrelevant phrases
+                    answer = self._remove_irrelevant_phrases(answer, question, language)
                     return {
                         'refined_answer': answer,
                         'method': 'langchain',
@@ -242,8 +248,8 @@ class AnswerRefiner:
                 print(f"⚠️  LangChain fallback: {e}")
                 pass  # Fallback to direct LLM call
             
-            # Use filtered chunks for direct LLM call too
-            retrieved_chunks = filtered_chunks
+            # Use filtered chunks for direct LLM call (already filtered above)
+            # No need to reassign - filtered_chunks is already used
             
             # Universal multilingual prompt (works for all languages)
             lang_name = self._get_language_name(language)
@@ -283,21 +289,48 @@ CRITICAL GROUNDING RULE:
 - Do NOT paraphrase or rephrase context in ways that add meaning not present in the original
 - Stick to facts EXACTLY as stated in the context
 
+CRITICAL RELEVANCE RULE:
+- ONLY include information that DIRECTLY answers the question
+- If a chunk in the context talks about a different topic (e.g., economy, policy, development) but uses similar words, DO NOT include it
+- For example, if the question is "how to improve English", DO NOT include chunks about "improving at grassroots level" or "India improving economy" - these are NOT about improving English language skills
+- Filter out any content that doesn't directly relate to the question topic
+- If the question is about learning/improving a skill, ONLY include chunks about that specific skill, not general improvement in other areas
+
 CRITICAL: Do NOT say "context does not provide" or "the context doesn't mention" - if information is missing, just omit it. Never use disclaimers.
 
 FORMAT:
 Write a clear, comprehensive, natural answer in {lang_name} that directly addresses the question. Include ALL relevant changes, facts, or details mentioned in the context, including specific numbers and dates. Write in flowing prose as continuous sentences. Do NOT use numbered lists (1., 2., 3.) or bullet points."""
             
+            # Count how many chunks we're using
+            num_chunks = len(filtered_chunks[:15])
+            
             user_prompt = f"""Question (in {lang_name}): {question}
 
-Context from transcripts:
+Context from transcripts (MULTIPLE SOURCES - YOU HAVE {num_chunks} CHUNKS - USE ALL OF THEM):
 {context}
 
-CRITICAL INSTRUCTION: If the question asks about "changes", "impacts", "developments", "what happened", or "what are described", you MUST list ALL of them mentioned in the context. Do not summarize - extract and list every single change, fact, development, or detail mentioned. Be exhaustive and comprehensive.
+CRITICAL INSTRUCTION - USE ALL CHUNKS (MOST IMPORTANT):
+- You have MULTIPLE context chunks above (marked as [Source 1], [Source 2], [Source 3], etc.)
+- You MUST read and synthesize information from ALL chunks, not just one
+- If chunk [Source 1] mentions one method/tip, and [Source 2] mentions another method/tip, include BOTH
+- If chunk [Source 3] has additional details, include those too
+- Synthesize and combine information from ALL chunks into a comprehensive answer
+- Do NOT just use the first chunk - you must use information from ALL relevant chunks
+- For "how to" questions, list ALL methods/tips/ways mentioned across ALL chunks
+- If multiple chunks mention different aspects, combine them all
+
+CRITICAL RELEVANCE FILTERING:
+- BEFORE including ANY information from a context chunk, verify it DIRECTLY answers the question
+- If a chunk uses similar words but is about a DIFFERENT topic, IGNORE that specific chunk completely
+- Example: If question is "how to improve English" and a chunk says "programs to improve at grassroots level" or "India improving economy", DO NOT include it - it's NOT about improving English language skills
+- ONLY include chunks that are about the EXACT topic asked in the question
+- If the question is about learning/improving a skill (like English), ONLY include chunks about that skill, not general improvement in other areas
+
+CRITICAL INSTRUCTION: If the question asks about "how to", "ways to", "methods to", "changes", "impacts", "developments", "what happened", or "what are described", you MUST list ALL of them mentioned across ALL context chunks. Do not summarize - extract and list every single method, tip, way, change, fact, development, or detail mentioned. Be exhaustive and comprehensive. Synthesize information from ALL chunks.
 
 IMPORTANT: Answer in {lang_name} language ONLY. The question is in {lang_name}, so your answer must be in {lang_name}.
 
-Provide a clear, comprehensive answer that directly addresses the question. Extract and include ALL relevant information from the context above. If the question asks for "changes", "impacts", "facts", "details", or "what are described", include ALL of them mentioned in the context. Use ONLY information from the context above. Do NOT add any information not explicitly stated. Write naturally in continuous prose sentences, connecting all relevant points. Do NOT use numbered lists (1., 2., 3.) or bullet points. Be thorough and include all relevant information. Answer in {lang_name}."""
+Provide a clear, comprehensive answer that directly addresses the question. Extract and synthesize information from ALL context chunks above that DIRECTLY answer the question. If multiple chunks mention different methods/tips/ways, include ALL of them. Filter out any chunks that use similar words but are about different topics. Use ONLY information from the context above. Do NOT add any information not explicitly stated. Write naturally in continuous prose sentences, connecting all relevant points from multiple chunks. Do NOT use numbered lists (1., 2., 3.) or bullet points. Be thorough and include all relevant information from ALL chunks. Answer in {lang_name}."""
 
             response = self.groq_client.chat.completions.create(
                 model="llama-3.1-8b-instant",
@@ -321,13 +354,122 @@ Provide a clear, comprehensive answer that directly addresses the question. Extr
             # Additional grounding check: Verify each sentence has support in context
             refined_answer = self._verify_grounding(refined_answer, context)
             
+            # NEW: Remove sentences that don't answer the question
+            refined_answer = self._filter_irrelevant_sentences(refined_answer, question, context)
+            
+            # FINAL VALIDATION: Remove specific irrelevant phrases that shouldn't appear
+            refined_answer = self._remove_irrelevant_phrases(refined_answer, question, language)
+            
             return {
                 'refined_answer': refined_answer,
                 'method': 'llm',
-                'chunks_used': min(len(retrieved_chunks), 15),
+                'chunks_used': min(len(filtered_chunks), 15),  # Use filtered_chunks count
                 'is_from_context': True,
                 'context_relevant': True
             }
+            
+        except Exception as e:
+            print(f"⚠️  LLM refinement failed: {e}")
+            return self._refine_simple(question, retrieved_chunks, language)
+    
+    def _refine_with_llm_streaming(
+        self,
+        question: str,
+        retrieved_chunks: List[Dict[str, Any]],
+        language: str,
+        max_length: int
+    ):
+        """Stream answer using LLM (generator function)"""
+        try:
+            # Prepare context from top chunks
+            context_parts = []
+            for i, chunk in enumerate(retrieved_chunks[:15]):
+                text = chunk.get('text', '') or chunk.get('content', '') or chunk.get('chunk_text', '')
+                if text and text.strip():
+                    chunk_text = text[:2000] + "..." if len(text) > 2000 else text
+                    context_parts.append(f"[Source {i+1}]: {chunk_text}")
+            
+            context = '\n\n'.join(context_parts) if context_parts else "No context available."
+            
+            if not context_parts:
+                # Fallback: yield simple answer
+                answer_parts = []
+                for chunk in retrieved_chunks[:3]:
+                    text = chunk.get('text', '')
+                    if text:
+                        answer_parts.append(text)
+                answer = ' '.join(answer_parts)
+                for word in answer.split():
+                    yield word + ' '
+                return
+            
+            # Filter chunks
+            filtered_chunks = self._filter_irrelevant_chunks(retrieved_chunks, question=question)
+            retrieved_chunks = filtered_chunks if filtered_chunks else retrieved_chunks[:5]
+            
+            # Prepare prompts
+            lang_name = self._get_language_name(language)
+            system_prompt = f"""You are a comprehensive information extractor. Answer questions using ONLY the information provided in the context below.
+
+CRITICAL LANGUAGE RULE:
+- The question is in {lang_name} language
+- You MUST answer in {lang_name} language ONLY
+- Do NOT switch to any other language, even if context chunks are in a different language
+
+COMPREHENSIVE EXTRACTION RULES:
+1. Use ONLY information from the context - do NOT add any information not explicitly stated
+2. Write in natural, flowing prose - do NOT use bullet points, numbered lists (1., 2., 3.), or structured sections
+3. Write in continuous sentences, connecting all relevant points naturally
+
+CRITICAL RELEVANCE RULE:
+- ONLY include information that DIRECTLY answers the question
+- If a chunk in the context talks about a different topic but uses similar words, DO NOT include it
+- Filter out any content that doesn't directly relate to the question topic
+
+CRITICAL: Do NOT say "context does not provide" - if information is missing, just omit it."""
+            
+            user_prompt = f"""Question (in {lang_name}): {question}
+
+Context from transcripts:
+{context}
+
+Provide a clear, comprehensive answer that directly addresses the question. Extract and include ONLY information from the context above that DIRECTLY answers the question. Answer in {lang_name}."""
+            
+            # Stream response
+            stream = self.groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=min(max_length * 3, 1500),
+                top_p=0.9,
+                stream=True  # Enable streaming
+            )
+            
+            # Yield chunks as they arrive
+            full_answer = ""
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_answer += content
+                    yield content
+            
+            # Note: Post-processing (cleaning, validation) would need to be done on full_answer
+            # For streaming, we yield raw chunks and do minimal processing
+            
+        except Exception as e:
+            print(f"⚠️  LLM streaming failed: {e}")
+            # Fallback: yield simple answer
+            answer_parts = []
+            for chunk in retrieved_chunks[:3]:
+                text = chunk.get('text', '')
+                if text:
+                    answer_parts.append(text)
+            answer = ' '.join(answer_parts)
+            for word in answer.split():
+                yield word + ' '
             
         except Exception as e:
             print(f"⚠️  LLM refinement failed: {e}")
@@ -661,8 +803,8 @@ Provide a clear, concise answer:"""
         }
         return fallback_messages.get(language, fallback_messages['en'])
     
-    def _filter_irrelevant_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Filter out irrelevant/noise chunks"""
+    def _filter_irrelevant_chunks(self, chunks: List[Dict[str, Any]], question: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Filter out irrelevant/noise chunks and chunks not related to the question"""
         import re
         
         # Patterns that indicate irrelevant/test content
@@ -689,10 +831,89 @@ Provide a clear, concise answer:"""
                     is_noise = True
                     break
             
-            if not is_noise:
-                filtered_chunks.append(chunk)
+            if is_noise:
+                continue
+            
+            # NEW: Check if chunk is relevant to the question topic
+            if question:
+                if not self._is_chunk_relevant_to_question(chunk, question):
+                    continue  # Skip chunks that don't relate to the question
+            
+            filtered_chunks.append(chunk)
         
         return filtered_chunks if filtered_chunks else chunks  # Return original if all filtered out
+    
+    def _is_chunk_relevant_to_question(self, chunk: Dict[str, Any], question: str) -> bool:
+        """Check if a chunk is actually relevant to the question using semantic similarity"""
+        import numpy as np
+        
+        text = chunk.get('text', '') or chunk.get('content', '') or chunk.get('chunk_text', '')
+        if not text or not text.strip():
+            return False
+        
+        # If no embedder available, fall back to keyword matching
+        if not self.embedder:
+            return self._is_chunk_relevant_keyword_fallback(chunk, question)
+        
+        try:
+            # Compute embeddings for question and chunk
+            question_embedding = self.embedder.embed_text(question)
+            chunk_embedding = self.embedder.embed_text(text)
+            
+            # Calculate cosine similarity
+            question_norm = question_embedding / (np.linalg.norm(question_embedding) or 1.0)
+            chunk_norm = chunk_embedding / (np.linalg.norm(chunk_embedding) or 1.0)
+            similarity = float(np.dot(question_norm, chunk_norm))
+            
+            # STRICTER threshold: chunks with similarity >= 0.6 are considered relevant
+            # This is stricter than initial retrieval (which uses 0.2-0.3)
+            # because we want to filter out false positives, especially for multilingual content
+            # where words can have different meanings in different contexts
+            relevance_threshold = 0.6  # Increased from 0.5 to 0.6 for better topic discrimination
+            
+            is_relevant = similarity >= relevance_threshold
+            
+            if not is_relevant:
+                print(f"🔍 Filtered chunk (similarity: {similarity:.3f} < {relevance_threshold}): {text[:100]}...")
+            
+            return is_relevant
+            
+        except Exception as e:
+            print(f"⚠️  Semantic relevance check failed: {e}, using fallback")
+            return self._is_chunk_relevant_keyword_fallback(chunk, question)
+    
+    def _is_chunk_relevant_keyword_fallback(self, chunk: Dict[str, Any], question: str) -> bool:
+        """Fallback keyword-based check if semantic similarity fails"""
+        import re
+        
+        text = chunk.get('text', '') or chunk.get('content', '') or chunk.get('chunk_text', '')
+        if not text:
+            return False
+        
+        question_lower = question.lower().strip()
+        text_lower = text.lower()
+        
+        # Extract meaningful words (4+ chars)
+        question_words = set(re.findall(r'\b\w{4,}\b', question_lower))
+        text_words = set(re.findall(r'\b\w{4,}\b', text_lower))
+        
+        # Remove common stop words
+        stop_words = {'what', 'how', 'why', 'when', 'where', 'who', 'which', 'that', 'this', 
+                      'with', 'from', 'have', 'been', 'were', 'will', 'would', 'could', 'should', 
+                      'about', 'their', 'there', 'these', 'those', 'them', 'they', 'then', 'than'}
+        
+        question_topics = question_words - stop_words
+        text_topics = text_words - stop_words
+        
+        if not question_topics:
+            return True  # If no topics extracted, assume relevant
+        
+        # Check topic overlap
+        overlap = len(question_topics & text_topics)
+        overlap_ratio = overlap / len(question_topics) if question_topics else 0
+        
+        # Need at least 30% topic overlap
+        return overlap_ratio >= 0.3
     
     def _clean_answer_format(self, answer: str) -> str:
         """Remove verbose sections and make answer natural"""
@@ -964,3 +1185,161 @@ Provide a clear, concise answer:"""
             answer += '.'
         
         return answer.strip()
+    
+    def _filter_irrelevant_sentences(self, answer: str, question: str, context: str) -> str:
+        """Remove sentences from answer that don't actually answer the question using semantic similarity"""
+        import re
+        import numpy as np
+        
+        if not self.embedder:
+            # Fallback to keyword-based if no embedder
+            return self._filter_irrelevant_sentences_keyword(answer, question, context)
+        
+        # Split answer into sentences
+        sentences = re.split(r'[.!?]\s+', answer)
+        relevant_sentences = []
+        
+        try:
+            question_embedding = self.embedder.embed_text(question)
+            question_norm = question_embedding / (np.linalg.norm(question_embedding) or 1.0)
+            
+            # Limit context size for embedding (to avoid token limits)
+            context_for_embedding = context[:2000] if len(context) > 2000 else context
+            context_embedding = self.embedder.embed_text(context_for_embedding)
+            context_norm = context_embedding / (np.linalg.norm(context_embedding) or 1.0)
+            
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if not sentence or len(sentence) < 10:
+                    continue
+                
+                # Compute semantic similarity between question and sentence
+                sentence_embedding = self.embedder.embed_text(sentence)
+                sentence_norm = sentence_embedding / (np.linalg.norm(sentence_embedding) or 1.0)
+                q_similarity = float(np.dot(question_norm, sentence_norm))
+                
+                # Also check if sentence is grounded in context
+                ctx_similarity = float(np.dot(sentence_norm, context_norm))
+                
+                # STRICTER thresholds for multilingual content:
+                # 1. Relevant to question (similarity >= 0.55, increased from 0.5)
+                # 2. Grounded in context (similarity >= 0.45, increased from 0.4)
+                # This helps filter out sentences that use similar words but are about different topics
+                if q_similarity >= 0.55 and ctx_similarity >= 0.45:
+                    relevant_sentences.append(sentence)
+                else:
+                    print(f"🔍 Filtered sentence (q_sim: {q_similarity:.3f}, ctx_sim: {ctx_similarity:.3f}): {sentence[:80]}...")
+            
+        except Exception as e:
+            print(f"⚠️  Semantic sentence filtering failed: {e}, using keyword fallback")
+            return self._filter_irrelevant_sentences_keyword(answer, question, context)
+        
+        # Join relevant sentences
+        filtered_answer = '. '.join(relevant_sentences)
+        if filtered_answer and not filtered_answer.endswith(('.', '!', '?')):
+            filtered_answer += '.'
+        
+        return filtered_answer.strip()
+    
+    def _remove_irrelevant_phrases(self, answer: str, question: str, language: str) -> str:
+        """Remove sentences that are semantically irrelevant to the question (language-agnostic)"""
+        import re
+        import numpy as np
+        
+        # Split answer into sentences
+        sentences = re.split(r'[.!?]\s+', answer)
+        filtered_sentences = []
+        
+        if not self.embedder:
+            # No embedder - skip this check, return original answer
+            return answer
+        
+        try:
+            # Compute question embedding once
+            question_embedding = self.embedder.embed_text(question)
+            question_norm = question_embedding / (np.linalg.norm(question_embedding) or 1.0)
+            
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if not sentence or len(sentence) < 10:
+                    # Keep very short sentences (they might be fragments)
+                    if sentence:
+                        filtered_sentences.append(sentence)
+                    continue
+                
+                # Compute semantic similarity between question and sentence
+                sentence_embedding = self.embedder.embed_text(sentence)
+                sentence_norm = sentence_embedding / (np.linalg.norm(sentence_embedding) or 1.0)
+                similarity = float(np.dot(question_norm, sentence_norm))
+                
+                # Use strict threshold (0.5) - if sentence is not relevant to question, remove it
+                # This catches cases where semantic filtering at chunk level missed something
+                # Works for ANY language and ANY question topic
+                if similarity >= 0.5:
+                    filtered_sentences.append(sentence)
+                else:
+                    print(f"🔍 Removed irrelevant sentence (sim: {similarity:.3f}): {sentence[:80]}...")
+            
+        except Exception as e:
+            print(f"⚠️  Irrelevant phrase removal failed: {e}, keeping original answer")
+            return answer
+        
+        # Join filtered sentences
+        filtered_answer = '. '.join(filtered_sentences)
+        if filtered_answer and not filtered_answer.endswith(('.', '!', '?')):
+            filtered_answer += '.'
+        
+        return filtered_answer.strip()
+    
+    def _filter_irrelevant_sentences_keyword(self, answer: str, question: str, context: str) -> str:
+        """Fallback keyword-based sentence filtering"""
+        import re
+        
+        # Split answer into sentences
+        sentences = re.split(r'[.!?]\s+', answer)
+        relevant_sentences = []
+        
+        question_lower = question.lower().strip()
+        context_lower = context.lower()
+        
+        # Extract question topic
+        question_words = set(re.findall(r'\b\w{4,}\b', question_lower))
+        stop_words = {'what', 'how', 'why', 'when', 'where', 'who', 'which', 'that', 'this', 'with', 'from', 'have', 'been', 'were', 'will', 'would', 'could', 'should', 'about', 'their', 'there', 'these', 'those', 'them', 'they', 'then', 'than', 'does', 'doesnt', 'dont', 'doesn'}
+        question_topics = question_words - stop_words
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            sentence_lower = sentence.lower()
+            
+            # Extract key words from sentence
+            sentence_words = set(re.findall(r'\b\w{4,}\b', sentence_lower))
+            sentence_topics = sentence_words - stop_words
+            
+            # Check topic overlap
+            is_relevant = False
+            if question_topics:
+                topic_overlap = len(question_topics & sentence_topics)
+                if topic_overlap / len(question_topics) >= 0.2:  # At least 20% topic overlap
+                    is_relevant = True
+            
+            # Check if sentence appears in context (grounding check)
+            if is_relevant:
+                sentence_keywords = {w for w in sentence_topics if len(w) > 3}
+                context_keywords = set(re.findall(r'\b\w{4,}\b', context_lower))
+                overlap = len(sentence_keywords & context_keywords)
+                if sentence_keywords and overlap / len(sentence_keywords) < 0.2:
+                    # Low overlap with context - might be hallucination
+                    is_relevant = False
+            
+            if is_relevant:
+                relevant_sentences.append(sentence)
+        
+        # Join relevant sentences
+        filtered_answer = '. '.join(relevant_sentences)
+        if filtered_answer and not filtered_answer.endswith(('.', '!', '?')):
+            filtered_answer += '.'
+        
+        return filtered_answer.strip()

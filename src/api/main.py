@@ -5,6 +5,8 @@ Backend API for React frontend
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
+import json
+import asyncio
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 import os
@@ -19,6 +21,18 @@ from src.translation.robust_integration import RobustTranscriptionTranslationInt
 from src.core.config import Config
 
 app = FastAPI(title="MemoAI API", version="1.0.0")
+
+# Request logging middleware for debugging
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all incoming requests for debugging"""
+    print(f"📥 Request: {request.method} {request.url.path}")
+    if "/api/upload/subtitles" in request.url.path:
+        print(f"🎯 Subtitle upload endpoint requested! Path: {request.url.path}")
+    response = await call_next(request)
+    if response.status_code == 404:
+        print(f"❌ 404 for: {request.method} {request.url.path}")
+    return response
 
 # CORS middleware for React frontend - Allow all origins for development
 app.add_middleware(
@@ -69,7 +83,7 @@ async def general_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"detail": f"Internal server error: {str(exc)}"},
         headers=headers
-    )
+)
 
 # Initialize services
 auth_service = AuthService()
@@ -141,6 +155,34 @@ async def login(request: LoginRequest):
         raise HTTPException(status_code=401, detail=error)
 
 
+# Debug and utility endpoints
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "ok", "message": "API is running"}
+
+@app.get("/api/routes")
+async def list_routes():
+    """List all available routes (for debugging)"""
+    routes = []
+    for route in app.routes:
+        if hasattr(route, 'path') and hasattr(route, 'methods'):
+            routes.append({
+                'path': route.path,
+                'methods': list(route.methods)
+            })
+    return {"routes": routes}
+
+@app.get("/api/test/subtitle-endpoint")
+async def test_subtitle_endpoint():
+    """Test endpoint to verify subtitle route is registered"""
+    return {
+        "status": "ok",
+        "message": "Subtitle upload endpoint is available",
+        "endpoint": "/api/upload/subtitles",
+        "method": "POST"
+    }
+
 @app.get("/api/auth/user/{user_id}")
 async def get_user(user_id: int):
     """Get user information"""
@@ -167,8 +209,24 @@ async def transcribe_file(
     enable_validation: bool = Form(True),
     paragraph_format: bool = Form(False)
 ):
-    """Transcribe uploaded audio/video file"""
+    """
+    Transcribe uploaded audio/video file
+    
+    NOTE: This endpoint is for audio/video files ONLY.
+    For subtitle files (.srt/.vtt), use /api/upload/subtitles instead.
+    """
     try:
+        # Early check: If file is a subtitle, reject and redirect to subtitle endpoint
+        file_ext = Path(file.filename).suffix.lower()
+        if file_ext in ['.srt', '.vtt']:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Subtitle files (.srt/.vtt) must be uploaded via /api/upload/subtitles endpoint. "
+                    f"Detected subtitle file: {file.filename}"
+                )
+            )
+        
         # Save uploaded file temporarily
         temp_dir = Path(Config.DATA_DIR) / "temp"
         temp_dir.mkdir(exist_ok=True)
@@ -177,6 +235,29 @@ async def transcribe_file(
         with open(temp_file, "wb") as f:
             content = await file.read()
             f.write(content)
+        
+        # Check if file is a subtitle file (check both extension and try to parse)
+        from src.transcription.subtitle_parser import SubtitleParser
+        is_subtitle = False
+        try:
+            # First check by extension
+            is_subtitle = SubtitleParser.is_subtitle_file(temp_file)
+            # If extension check fails, try to parse the file to confirm
+            if not is_subtitle and temp_file.exists():
+                # Try to read first few lines to detect subtitle format
+                try:
+                    with open(temp_file, 'r', encoding='utf-8') as f:
+                        first_lines = ''.join([f.readline() for _ in range(5)])
+                        # Check for SRT/VTT markers
+                        if 'WEBVTT' in first_lines.upper() or '-->' in first_lines:
+                            is_subtitle = True
+                            print(f"⚠️  Detected subtitle file by content (extension was: {temp_file.suffix})")
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"Warning: Error checking subtitle file: {e}")
+        
+        print(f"📄 File: {file.filename}, Extension: {temp_file.suffix}, Is Subtitle: {is_subtitle}")
         
         # Transcribe
         result = transcription_service.transcribe(
@@ -188,25 +269,96 @@ async def transcribe_file(
             enable_validation=enable_validation
         )
         
+        # Determine language for subtitle files (they don't have language info)
+        # CRITICAL: Subtitle files (.srt/.vtt) don't contain language metadata
+        # Default to 'en' immediately if no language provided, or try detection as fallback
+        detected_language = result.get('language')
+        
+        # For subtitle files, prioritize user-provided language, then detection, then default to 'en'
+        if is_subtitle:
+            if language and language != "auto" and language != "None" and str(language).lower() not in ('none', 'null', ''):
+                detected_language = str(language).strip()
+                print(f"✓ Using provided language for subtitle: {detected_language}")
+            elif not detected_language or detected_language == "None" or detected_language is None:
+                # Try to detect language from text (optional, can fail gracefully)
+                text_to_detect = result.get('text', '')
+                if text_to_detect and text_to_detect.strip():
+                    try:
+                        from src.rag.embeddings import MultilingualEmbedder
+                        embedder = MultilingualEmbedder()
+                        detected_language = embedder.detect_language(text_to_detect)
+                        print(f"✓ Detected language from subtitle text: {detected_language}")
+                    except Exception as e:
+                        print(f"⚠️  Language detection failed: {e}, using default 'en'")
+                        detected_language = 'en'  # Safe default for subtitles
+                else:
+                    detected_language = 'en'  # No text to detect from, use default
+                    print(f"✓ No text in subtitle, using default language 'en'")
+        elif not detected_language or detected_language == "None" or detected_language is None:
+            # For non-subtitle files, use provided language or default
+            if language and language != "auto" and language != "None" and str(language).lower() != 'none':
+                detected_language = str(language).strip()
+            else:
+                detected_language = 'en'
+        
+        # Final safety check - ensure language is never None, empty, or "None"
+        if not detected_language or detected_language == "None" or str(detected_language).lower() == 'none' or str(detected_language).strip() == '':
+            print(f"⚠️  Language was invalid ({detected_language}), forcing to 'en'")
+            detected_language = 'en'
+        
+        # Ensure it's a string and not None
+        detected_language = str(detected_language).strip() if detected_language else 'en'
+        
+        print(f"✓ Determined language: {detected_language} (is_subtitle: {is_subtitle}, provided: {language})")
+        
+        # Update result with detected language (for subtitle files)
+        if is_subtitle:
+            result['language'] = detected_language
+        
         # Save to database
         document_id = None
         transcript_id = None
         if storage_service:
             try:
+                # Determine source_type based on file type
+                source_type = "subtitle" if is_subtitle else "file"
+                
+                # Double-check language before saving
+                final_language = str(detected_language).strip() if detected_language else 'en'
+                if not final_language or final_language.lower() == 'none':
+                    final_language = 'en'
+                
+                print(f"💾 Saving transcript with language: {final_language}, source_type: {source_type}")
+                
                 saved_doc = storage_service.save_transcript(
                     user_id=user_id,
                     text=result.get('text', ''),
-                    language=result.get('language', 'auto'),
+                    language=final_language,  # Use detected/provided language, never None
                     source_file=str(temp_file),
-                    source_type="file",
+                    source_type=source_type,
                     model_used=result.get('full_result', {}).get('model', 'unknown'),
                     paragraphs=result.get('paragraphs', []),
                     segments=result.get('segments', [])
                 )
                 document_id = saved_doc['document_id']
                 transcript_id = saved_doc['id']
+            except ValueError as e:
+                # Document ID collision - storage service will retry automatically
+                error_msg = str(e)
+                if "Document ID" in error_msg and ("already exists" in error_msg or "collision" in error_msg):
+                    print(f"⚠️  Document ID collision detected, storage service will retry automatically")
+                    # Storage service now handles retry internally, but if it still fails, raise error
+                    raise HTTPException(
+                        status_code=500, 
+                        detail=f"Failed to save transcript after retry: {error_msg}"
+                    )
+                else:
+                    raise HTTPException(status_code=500, detail=f"Failed to save transcript: {error_msg}")
             except Exception as e:
-                print(f"Warning: Failed to save to database: {e}")
+                print(f"❌ Failed to save to database: {e}")
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=f"Failed to save transcript: {str(e)}")
         
         # Clean up temp file
         try:
@@ -222,6 +374,167 @@ async def transcribe_file(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/upload/subtitles")
+async def upload_subtitles(
+    file: UploadFile = File(...),
+    language: Optional[str] = Form(None),
+    user_id: int = Form(...),
+    name: Optional[str] = Form(None)
+):
+    """
+    Dedicated endpoint for subtitle file uploads (.srt/.vtt)
+    
+    This endpoint is SEPARATE from audio/video transcription.
+    It handles subtitle files directly without going through
+    the transcription pipeline.
+    
+    Key differences from /api/transcribe/file:
+    - No audio/video processing
+    - No transcription logic
+    - Language defaults to 'en' if not provided
+    - Uses subtitle-specific save function
+    - model_used = "subtitle_import"
+    """
+    print(f"🔔 upload_subtitles endpoint called! File: {file.filename if file else 'None'}")
+    from src.transcription.subtitle_parser import SubtitleParser
+    from src.core.config import Config
+    
+    try:
+        # Validate file is a subtitle file
+        file_ext = Path(file.filename).suffix.lower()
+        if file_ext not in ['.srt', '.vtt']:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type. Only .srt and .vtt files are supported. Got: {file_ext}"
+            )
+        
+        # Save uploaded file temporarily
+        temp_dir = Path(Config.DATA_DIR) / "temp"
+        temp_dir.mkdir(exist_ok=True)
+        temp_file = temp_dir / file.filename
+        
+        with open(temp_file, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        
+        print(f"📄 Subtitle upload: {file.filename}, Extension: {file_ext}")
+        
+        # Parse subtitle file (NO transcription, just parsing)
+        try:
+            parsed_result = SubtitleParser.parse_subtitle(temp_file)
+        except Exception as e:
+            # Clean up temp file
+            try:
+                temp_file.unlink()
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to parse subtitle file: {str(e)}"
+            )
+        
+        # Extract data from parsed result
+        text = parsed_result.get('text', '')
+        segments = parsed_result.get('segments', [])
+        
+        if not text or not text.strip():
+            # Clean up temp file
+            try:
+                temp_file.unlink()
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=400,
+                detail="Subtitle file appears to be empty or contains no text"
+            )
+        
+        # Determine language for subtitle
+        # CRITICAL: Default to 'en' if not provided (subtitle files don't have language metadata)
+        subtitle_language = 'en'  # Safe default
+        
+        if language and language.strip() and language.lower() not in ('none', 'null', 'auto', ''):
+            subtitle_language = str(language).strip()
+            print(f"✓ Using provided language for subtitle: {subtitle_language}")
+        else:
+            # Optional: Try to detect language from text (but default to 'en' if detection fails)
+            try:
+                from src.rag.embeddings import MultilingualEmbedder
+                embedder = MultilingualEmbedder()
+                detected = embedder.detect_language(text)
+                if detected and detected.strip():
+                    subtitle_language = detected.strip()
+                    print(f"✓ Detected language from subtitle text: {subtitle_language}")
+                else:
+                    print(f"✓ Language detection returned empty, using default 'en'")
+            except Exception as e:
+                print(f"⚠️  Language detection failed: {e}, using default 'en'")
+        
+        # Final guarantee: language must be valid
+        subtitle_language = str(subtitle_language).strip() if subtitle_language else 'en'
+        if not subtitle_language:
+            subtitle_language = 'en'
+        
+        print(f"💾 Saving subtitle with language: {subtitle_language} (guaranteed non-None)")
+        
+        # Save using subtitle-specific function (bypasses audio/video logic)
+        document_id = None
+        transcript_id = None
+        if storage_service:
+            try:
+                saved_doc = storage_service.save_subtitle_transcript(
+                    user_id=user_id,
+                    text=text,
+                    segments=segments,
+                    source_file=str(temp_file),
+                    language=subtitle_language,  # Guaranteed to be valid, never None
+                    name=name
+                )
+                document_id = saved_doc['document_id']
+                transcript_id = saved_doc['id']
+                print(f"✓ Subtitle saved successfully: transcript_id={transcript_id}, document_id={document_id}")
+            except Exception as e:
+                print(f"❌ Failed to save subtitle: {e}")
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to save subtitle: {str(e)}"
+                )
+        
+        # Clean up temp file
+        try:
+            temp_file.unlink()
+        except Exception:
+            pass
+        
+        # Return result in same format as transcription endpoint for frontend compatibility
+        return {
+            'text': text,
+            'segments': segments,
+            'language': subtitle_language,
+            'document_id': document_id,
+            'transcript_id': transcript_id,
+            'source_type': 'subtitle',
+            'model_used': 'subtitle_import',
+            'metadata': {
+                'source_file': file.filename,
+                'format': file_ext.lstrip('.'),
+                'segment_count': len(segments)
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in upload_subtitles: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
 
 
 @app.post("/api/transcribe/url")
@@ -262,8 +575,23 @@ async def transcribe_url(
                 )
                 document_id = saved_doc['document_id']
                 transcript_id = saved_doc['id']
+            except ValueError as e:
+                # Document ID collision - storage service will retry automatically
+                error_msg = str(e)
+                if "Document ID" in error_msg and ("already exists" in error_msg or "collision" in error_msg):
+                    print(f"⚠️  Document ID collision detected, storage service will retry automatically")
+                    # Storage service now handles retry internally, but if it still fails, raise error
+                    raise HTTPException(
+                        status_code=500, 
+                        detail=f"Failed to save transcript after retry: {error_msg}"
+                    )
+                else:
+                    raise HTTPException(status_code=500, detail=f"Failed to save transcript: {error_msg}")
             except Exception as e:
-                print(f"Warning: Failed to save to database: {e}")
+                print(f"❌ Failed to save to database: {e}")
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=f"Failed to save transcript: {str(e)}")
         
         # Add database IDs to result
         result['document_id'] = document_id
@@ -314,18 +642,68 @@ async def translate(
         if not translation_integration:
             raise HTTPException(status_code=500, detail="Translation service not available")
         
+        # Check if this is a subtitle file - if so, force segment-by-segment translation
+        is_subtitle = transcript.get('source_type') == 'subtitle'
+        
         # Use robust translator if available
         if isinstance(translation_integration, RobustTranscriptionTranslationIntegration):
-            translation_result = translation_integration.translate_transcription(
-                transcription_result=transcription_result,
-                target_language=target_language,
-                preferred_provider=preferred_provider,
-                use_sentence_by_sentence=True,
-                enable_paragraph_retranslation=enable_paragraph_retranslation
-            )
+            # For subtitle files, always translate segment-by-segment to preserve timestamps
+            # This is CRITICAL: Subtitle generation requires per-segment translation
+            if is_subtitle:
+                # Translate segments individually for subtitle files
+                segments = transcription_result.get('segments', [])
+                if not segments:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Subtitle file has no segments. Cannot perform segment-level translation."
+                    )
+                
+                print(f"📝 Translating subtitle file segment-by-segment ({len(segments)} segments)")
+                translated_segments = translation_integration.translate_segments(
+                    segments=segments,
+                    target_language=target_language,
+                    source_language=transcript['language'],
+                    preferred_provider=preferred_provider
+                )
+                
+                # Validate that translated_segments were created
+                if not translated_segments or len(translated_segments) == 0:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Segment-level translation failed. No translated segments were created."
+                    )
+                
+                # Validate that each segment has required fields
+                for i, seg in enumerate(translated_segments):
+                    if 'start' not in seg or 'text' not in seg:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Translated segment {i+1} is missing required fields (start, text)."
+                        )
+                
+                # Build translation result from segments
+                # NOTE: translated_text is created for database storage, but subtitle export will use translated_segments
+                translated_text = ' '.join([seg.get('text', '') for seg in translated_segments])
+                translation_result = {
+                    'translated_text': translated_text,
+                    'translation': {
+                        'segments': translated_segments
+                    },
+                    'provider': preferred_provider or 'unknown'
+                }
+                print(f"✅ Translated {len(translated_segments)} subtitle segments (each with individual translation)")
+            else:
+                translation_result = translation_integration.translate_transcription(
+                    transcription_result=transcription_result,
+                    target_language=target_language,
+                    preferred_provider=preferred_provider,
+                    use_sentence_by_sentence=True,
+                    enable_paragraph_retranslation=enable_paragraph_retranslation
+                )
         else:
             from src.translation import TranslationGranularity
-            granularity_enum = TranslationGranularity.WHOLE_TEXT
+            # For subtitle files, use LINE_BY_LINE granularity to preserve segments
+            granularity_enum = TranslationGranularity.LINE_BY_LINE if is_subtitle else TranslationGranularity.WHOLE_TEXT
             if granularity == "paragraph":
                 granularity_enum = TranslationGranularity.PARAGRAPH
             elif granularity == "line_by_line":
@@ -675,7 +1053,7 @@ async def generate_note(
                         # Use original content if translation fails
                         translated_content = note.get('content', '')
                 
-                # Return note with translated content for display
+                    # Return note with translated content for display
                 if translated_content and translated_content.strip():
                     note['translated_content'] = translated_content
                     note['display_language'] = target_language
@@ -700,7 +1078,7 @@ async def generate_note(
                         note['display_language'] = target_language
                 except Exception as e2:
                     print(f"Warning: Fallback translation also failed: {e2}")
-                    # Return canonical note even if translation fails
+                # Return canonical note even if translation fails
         
         return note
         
@@ -1039,6 +1417,27 @@ async def export_subtitles(
         translated_segments = translation.get('translated_segments') if translation else None
         translated_paragraphs = translation.get('translated_paragraphs') if translation else None
         
+        # Debug logging
+        print(f"🔍 Export Debug: transcript_id={transcript_id}, source_type={transcript.get('source_type')}")
+        print(f"   Original segments count: {len(transcription_data.get('segments', []))}")
+        print(f"   Original paragraphs count: {len(transcription_data.get('paragraphs', []))}")
+        
+        if translated_segments:
+            print(f"📝 Export: Found {len(translated_segments)} translated segments")
+            if len(translated_segments) > 0:
+                first_seg = translated_segments[0]
+                last_seg = translated_segments[-1] if len(translated_segments) > 1 else first_seg
+                print(f"   First segment: start={first_seg.get('start')}, text={first_seg.get('text', '')[:50]}...")
+                print(f"   Last segment: start={last_seg.get('start')}, text={last_seg.get('text', '')[:50]}...")
+                # Show a few more segments for debugging
+                for i, seg in enumerate(translated_segments[:3]):
+                    print(f"   Segment {i+1}: start={seg.get('start')}, text_length={len(seg.get('text', ''))}")
+        else:
+            print(f"⚠️  Export: No translated_segments found, will use original text only")
+            if translated_text:
+                print(f"   Full translated_text length: {len(translated_text)} chars")
+                print(f"   First 100 chars of translated_text: {translated_text[:100]}")
+        
         # Generate subtitles
         from src.core.config import Config
         from pathlib import Path
@@ -1053,13 +1452,34 @@ async def export_subtitles(
             url_name = re.sub(r'[^\w\s-]', '', transcript.get('source_url', ''))
             source_file = Path(url_name[:50])  # Limit length
         
+        # Determine if this is a subtitle file - use segments, not paragraphs
+        is_subtitle_file = transcript.get('source_type') == 'subtitle'
+        use_paragraphs_for_export = not is_subtitle_file  # Use paragraphs only for non-subtitle files
+        print(f"🔍 Export: is_subtitle_file={is_subtitle_file}, use_paragraphs={use_paragraphs_for_export}")
+        
+        # GUARDRAIL: For subtitle files, translated_segments is MANDATORY
+        # Subtitle generation requires per-segment translation - cannot use full translated_text
+        if is_subtitle_file and not translated_segments:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Subtitle files require segment-level translation. "
+                    "Please translate this transcript first using /api/translate endpoint. "
+                    "The translation will create translated_segments with per-segment translations."
+                )
+            )
+        
+        # For subtitle files, NEVER use translated_text - only use translated_segments
+        # For non-subtitle files, we can use translated_text if segments aren't available
+        export_translated_text = None if is_subtitle_file else translated_text
+        
         generated_files = []
         if format == "both":
             files = SubtitleGenerator.generate_both(
                 transcription_data=transcription_data,
                 source_file=source_file,
-                use_paragraphs=True,
-                translated_text=translated_text,
+                use_paragraphs=use_paragraphs_for_export,  # False for subtitle files
+                translated_text=export_translated_text,  # None for subtitle files
                 translated_segments=translated_segments
             )
             generated_files = list(files.values())
@@ -1067,8 +1487,8 @@ async def export_subtitles(
             file = SubtitleGenerator.generate_srt(
                 transcription_data=transcription_data,
                 source_file=source_file,
-                use_paragraphs=True,
-                translated_text=translated_text,
+                use_paragraphs=use_paragraphs_for_export,  # False for subtitle files
+                translated_text=export_translated_text,  # None for subtitle files
                 translated_segments=translated_segments
             )
             generated_files = [file]
@@ -1076,8 +1496,8 @@ async def export_subtitles(
             file = SubtitleGenerator.generate_vtt(
                 transcription_data=transcription_data,
                 source_file=source_file,
-                use_paragraphs=True,
-                translated_text=translated_text,
+                use_paragraphs=use_paragraphs_for_export,  # False for subtitle files
+                translated_text=export_translated_text,  # None for subtitle files
                 translated_segments=translated_segments
             )
             generated_files = [file]
@@ -1634,7 +2054,7 @@ async def download_export(
         
         if not export_file:
             raise HTTPException(status_code=404, detail="Export file not found")
-        
+    
         # Normalize and resolve file path
         try:
             stored_path = export_file['file_path']
@@ -1847,7 +2267,7 @@ async def download_file_direct(
         raise HTTPException(
             status_code=500, 
             detail=f"Internal server error: {str(e)}"
-        )
+    )
 
 
 @app.get("/api/exports/file/{file_path:path}/download")
@@ -1917,8 +2337,8 @@ async def download_export_by_path(
                     status_code=404, 
                     detail=f"File not found: {resolved_path} (resolved from: {file_path})"
                 )
-            
-            resolved_path = found_path
+            else:
+                resolved_path = found_path
         
         print(f"✓ Serving file: {resolved_path}")
         
@@ -2277,6 +2697,116 @@ async def rag_query(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/rag/query/stream")
+async def rag_query_stream(
+    question: str = Form(...),
+    user_id: int = Form(...),
+    top_k: int = Form(10),
+    min_similarity: float = Form(0.2),
+    use_advanced: bool = Form(True)
+):
+    """Stream RAG query response using Server-Sent Events"""
+    async def generate_stream():
+        try:
+            from src.rag import RAGQAEngine
+            from src.memory import StorageService
+            
+            storage = StorageService()
+            qa_engine = RAGQAEngine(
+                user_id=user_id,
+                storage_service=storage,
+                translation_service=translation_integration,
+                enable_advanced=use_advanced
+            )
+            
+            # Detect language
+            query_lang = qa_engine.detect_query_language(question)
+            
+            # Send initial metadata
+            yield f"data: {json.dumps({'type': 'metadata', 'language': query_lang})}\n\n"
+            
+            # Perform search (non-streaming part)
+            query_embedding = qa_engine.embedder.embed_text(question)
+            results = qa_engine.vectorstore.search(
+                query_embedding=query_embedding,
+                k=top_k * 3
+            )
+            
+            # Filter results by similarity
+            base_threshold = min_similarity
+            multilingual_threshold = base_threshold * 0.7
+            filtered_results = [
+                (meta, score) for meta, score in results
+                if score >= multilingual_threshold
+            ]
+            
+            if not filtered_results and results:
+                filtered_results = results[:top_k]
+            
+            if not filtered_results:
+                # No results - send general knowledge answer
+                yield f"data: {json.dumps({'type': 'answer_chunk', 'content': 'No relevant information found in your stored transcripts.'})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
+            
+            retrieved_chunks = [meta for meta, _ in filtered_results[:15]]
+            
+            # Stream answer using LLM
+            if use_advanced and qa_engine.refiner and qa_engine.refiner.use_llm:
+                # Stream from refiner
+                full_answer = ""
+                for chunk in qa_engine.refiner._refine_with_llm_streaming(
+                    question=question,
+                    retrieved_chunks=retrieved_chunks,
+                    language=query_lang,
+                    max_length=500
+                ):
+                    full_answer += chunk
+                    yield f"data: {json.dumps({'type': 'answer_chunk', 'content': chunk})}\n\n"
+            else:
+                # Fallback: simple concatenation
+                answer_parts = []
+                for meta in retrieved_chunks[:3]:
+                    text = meta.get('text', '')
+                    if text:
+                        answer_parts.append(text)
+                answer = ' '.join(answer_parts)
+                # Stream word by word for effect
+                words = answer.split()
+                for word in words:
+                    yield f"data: {json.dumps({'type': 'answer_chunk', 'content': word + ' '})}\n\n"
+                    await asyncio.sleep(0.01)  # Small delay for streaming effect
+            
+            # Send citations
+            citations = []
+            for i, (meta, score) in enumerate(filtered_results[:top_k]):
+                citations.append({
+                    'chunk_index': i + 1,
+                    'document_id': meta.get('document_id'),
+                    'transcript_id': meta.get('transcript_id'),
+                    'similarity': float(score)
+                })
+            
+            yield f"data: {json.dumps({'type': 'citations', 'citations': citations})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            
+        except Exception as e:
+            print(f"❌ Streaming error: {e}")
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+    
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
 @app.get("/api/rag/stats")
 async def get_rag_stats(user_id: int):
     """Get RAG vector store statistics"""
@@ -2297,7 +2827,25 @@ async def get_rag_stats(user_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/health")
-async def health():
-    """Health check endpoint"""
-    return {"status": "ok", "version": "1.0.0"}
+# Verify endpoints on startup
+@app.on_event("startup")
+async def verify_endpoints():
+    """Verify critical endpoints are registered when server starts"""
+    registered_paths = [route.path for route in app.routes if hasattr(route, 'path')]
+    required_endpoints = [
+        "/api/health",
+        "/api/routes", 
+        "/api/test/subtitle-endpoint",
+        "/api/upload/subtitles"
+    ]
+    missing = [ep for ep in required_endpoints if ep not in registered_paths]
+    if missing:
+        print(f"⚠️  WARNING: Some endpoints not registered: {missing}")
+    else:
+        print(f"✅ All endpoints registered successfully: {required_endpoints}")
+    
+    # Also print all POST routes for debugging
+    post_routes = [route.path for route in app.routes if hasattr(route, 'methods') and 'POST' in route.methods]
+    print(f"📋 All POST routes: {sorted(post_routes)}")
+
+

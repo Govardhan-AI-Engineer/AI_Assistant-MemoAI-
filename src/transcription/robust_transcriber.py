@@ -76,6 +76,14 @@ class RobustTranscriber:
         if not file_path.exists():
             raise TranscriptionError(f"File not found: {file_path}")
         
+        # Early rejection of subtitle files - they should use dedicated endpoint
+        from src.transcription.subtitle_parser import SubtitleParser
+        if SubtitleParser.is_subtitle_file(file_path):
+            raise TranscriptionError(
+                f"Subtitle files (.srt/.vtt) must be processed via /api/upload/subtitles endpoint. "
+                f"Detected subtitle file: {file_path.name}"
+            )
+        
         # Step 1: Extract audio if needed
         audio_path = file_path
         temp_files = []

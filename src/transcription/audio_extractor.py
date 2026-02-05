@@ -3,6 +3,8 @@ Audio extraction utilities for video files
 """
 import subprocess
 import tempfile
+import re
+import sys
 from pathlib import Path
 from typing import Optional
 from src.core.exceptions import TranscriptionError
@@ -77,17 +79,86 @@ class AudioExtractor:
                 str(output_path)
             ]
             
-            result = subprocess.run(
+            # Get video duration first for progress calculation
+            duration = None
+            try:
+                probe_cmd = [
+                    'ffprobe',
+                    '-v', 'error',
+                    '-show_entries', 'format=duration',
+                    '-of', 'default=noprint_wrappers=1:nokey=1',
+                    str(input_path)
+                ]
+                probe_result = subprocess.run(
+                    probe_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10
+                )
+                if probe_result.returncode == 0 and probe_result.stdout.strip():
+                    duration = float(probe_result.stdout.strip())
+            except (ValueError, subprocess.TimeoutExpired, FileNotFoundError):
+                pass  # Duration detection failed, progress will be time-based only
+            
+            # Run FFmpeg with real-time progress output
+            print(f"📹 Extracting audio from video: {input_path.name}")
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE,
                 text=True,
-                check=False
+                bufsize=1,
+                universal_newlines=True
             )
             
-            if result.returncode != 0:
+            # Parse FFmpeg progress output (goes to stderr)
+            stderr_output = []
+            progress_pattern = re.compile(r'time=(\d+):(\d+):(\d+\.\d+)')
+            last_progress = 0
+            
+            # Read stderr line by line to get progress updates
+            while True:
+                output = process.stderr.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output:
+                    stderr_output.append(output)
+                    # Parse time from output (format: time=HH:MM:SS.ms)
+                    match = progress_pattern.search(output)
+                    if match:
+                        try:
+                            hours, minutes, seconds = map(float, match.groups())
+                            current_time = hours * 3600 + minutes * 60 + seconds
+                            
+                            if duration and duration > 0:
+                                progress_percent = min(100, (current_time / duration) * 100)
+                                # Only update if progress changed significantly (avoid spam)
+                                if abs(progress_percent - last_progress) >= 1.0 or progress_percent >= 100:
+                                    print(f"   ⏳ Extraction progress: {progress_percent:.1f}% ({int(current_time)}s / {int(duration)}s)", end='\r')
+                                    sys.stdout.flush()
+                                    last_progress = progress_percent
+                            else:
+                                # If duration unknown, just show elapsed time
+                                print(f"   ⏳ Extracting... ({int(current_time)}s elapsed)", end='\r')
+                                sys.stdout.flush()
+                        except (ValueError, TypeError):
+                            pass  # Skip invalid time values
+            
+            # Wait for process to complete and get return code
+            returncode = process.wait()
+            stderr_text = ''.join(stderr_output)
+            
+            if returncode != 0:
                 raise TranscriptionError(
-                    f"FFmpeg extraction failed: {result.stderr}"
+                    f"FFmpeg extraction failed: {stderr_text}"
                 )
+            
+            # Print completion
+            if duration:
+                print(f"\n   ✅ Extraction complete: 100.0% ({int(duration)}s)")
+            else:
+                print(f"\n   ✅ Extraction complete")
             
             if not output_path.exists():
                 raise TranscriptionError("Audio extraction failed: output file not created")

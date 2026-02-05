@@ -15,7 +15,23 @@ function TranscriptionPanel({ user, onTranscriptionComplete }) {
   const [elapsedTime, setElapsedTime] = useState(0)
 
   const handleFileChange = (e) => {
-    setSelectedFile(e.target.files[0])
+    const file = e.target.files[0]
+    setSelectedFile(file)
+    
+    // Auto-fill name if it's a subtitle file and name field is empty
+    if (file) {
+      const fileExt = file.name.toLowerCase().split('.').pop()
+      if (fileExt === 'srt' || fileExt === 'vtt') {
+        console.log('Subtitle file detected:', file.name)
+      }
+    }
+  }
+  
+  // Check if file is a subtitle file
+  const isSubtitleFile = (file) => {
+    if (!file) return false
+    const fileExt = file.name.toLowerCase().split('.').pop()
+    return fileExt === 'srt' || fileExt === 'vtt'
   }
 
   const handleSubmit = async (e) => {
@@ -43,8 +59,60 @@ function TranscriptionPanel({ user, onTranscriptionComplete }) {
 
         const formData = new FormData()
         formData.append('file', selectedFile)
-        formData.append('language', language)
         formData.append('user_id', user.user_id)
+        
+        // Check if file is a subtitle file (.srt or .vtt)
+        const isSubtitle = isSubtitleFile(selectedFile)
+        
+        if (isSubtitle) {
+          // Use dedicated subtitle upload endpoint
+          console.log('Using subtitle upload endpoint for:', selectedFile.name)
+          console.log('Endpoint URL:', `${API_URL}/api/upload/subtitles`)
+          
+          // Ensure FormData keys match FastAPI endpoint exactly
+          // file, user_id, language (optional), name (optional)
+          if (language && language !== 'auto') {
+            formData.append('language', language)
+          }
+          // Optional: Add name field if you want custom naming for subtitles
+          // formData.append('name', customName)
+          
+          try {
+            response = await axios.post(`${API_URL}/api/upload/subtitles`, formData, {
+              // Do NOT set Content-Type manually - Axios will set it automatically with boundary
+              timeout: 60000, // 1 minute timeout for subtitle uploads (should be fast)
+              onUploadProgress: (progressEvent) => {
+                // Guard against progressEvent.total being undefined or 0
+                if (progressEvent.total && progressEvent.total > 0) {
+                  const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total)
+                  console.log(`Upload progress: ${percentCompleted}%`)
+                } else {
+                  console.log(`Upload progress: ${progressEvent.loaded} bytes uploaded`)
+                }
+              }
+            })
+          } catch (subtitleError) {
+            console.error('Subtitle upload error:', subtitleError)
+            console.error('Error response:', subtitleError.response)
+            
+            // Handle specific error cases
+            if (subtitleError.response?.status === 404) {
+              setError(`Subtitle upload endpoint not found. Please restart the backend server. Error: ${subtitleError.response?.data?.detail || '404 Not Found'}`)
+            } else if (subtitleError.response?.status === 400) {
+              setError(subtitleError.response?.data?.detail || 'Invalid subtitle file. Please check the file format.')
+            } else if (subtitleError.response?.status === 500) {
+              setError(subtitleError.response?.data?.detail || 'Server error during subtitle upload. Please try again.')
+            } else {
+              setError(subtitleError.response?.data?.detail || 'Subtitle upload failed. Please try again.')
+            }
+            
+            clearInterval(timeInterval)
+            setProcessing(false)
+            return
+          }
+        } else {
+          // Use regular transcription endpoint for audio/video files
+          formData.append('language', language)
         formData.append('enable_preprocessing', 'true')
         formData.append('enable_validation', 'true')
         formData.append('paragraph_format', 'true')
@@ -58,6 +126,7 @@ function TranscriptionPanel({ user, onTranscriptionComplete }) {
             console.log(`Upload progress: ${percentCompleted}%`)
           }
         })
+        }
       } else {
         if (!url.trim()) {
           setError('Please enter a URL')
@@ -125,15 +194,20 @@ function TranscriptionPanel({ user, onTranscriptionComplete }) {
 
         {inputType === 'file' ? (
           <div className="form-group">
-            <label>Select Audio/Video File</label>
+            <label>Select Audio/Video/Subtitle</label>
             <input
               type="file"
-              accept="audio/*,video/*"
+              accept="audio/*,video/*,.srt,.vtt"
               onChange={handleFileChange}
               disabled={processing}
             />
             {selectedFile && (
-              <div className="file-info">Selected: {selectedFile.name}</div>
+              <div className="file-info">
+                Selected: {selectedFile.name}
+                {isSubtitleFile(selectedFile) && (
+                  <span className="subtitle-badge"> (Subtitle file - will use dedicated upload endpoint)</span>
+                )}
+              </div>
             )}
           </div>
         ) : (

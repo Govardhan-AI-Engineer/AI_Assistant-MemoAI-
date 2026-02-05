@@ -2,7 +2,7 @@
 Robust integration layer for translation with transcription results
 Uses RobustTranslator for code-mixed multilingual speech
 """
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Any
 from src.translation.robust_translator import RobustTranslator
 from src.translation.exceptions import TranslationError
 
@@ -159,6 +159,77 @@ class RobustTranscriptionTranslationIntegration:
         )
         
         return translation_result.get('text', text)
+    
+    def translate_segments(
+        self,
+        segments: List[Dict[str, Any]],
+        target_language: str,
+        source_language: Optional[str] = None,
+        preferred_provider: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Translate transcription segments (for subtitle generation)
+        
+        Args:
+            segments: List of segment dictionaries with 'text' field
+            target_language: Target language code
+            source_language: Source language code (optional)
+            preferred_provider: Preferred provider name
+            
+        Returns:
+            List of segments with translated text
+        """
+        if not segments:
+            return []
+        
+        # Translate each segment individually using robust translator
+        translated_segments = []
+        for i, original_seg in enumerate(segments):
+            text = original_seg.get('text', '')
+            if not text or not text.strip():
+                # Empty segment - keep as is with all original metadata
+                translated_seg = original_seg.copy()
+                translated_seg['original_text'] = text
+                translated_segments.append(translated_seg)
+                continue
+            
+            try:
+                # Translate this segment
+                translation_result = self.robust_translator.translate(
+                    text=text,
+                    target_language=target_language,
+                    source_language=source_language,
+                    preferred_provider=preferred_provider,
+                    use_sentence_by_sentence=True
+                )
+                
+                translated_text = translation_result.get('text', text)
+                
+                # Create translated segment - CRITICAL: Preserve ALL original metadata
+                translated_seg = original_seg.copy()  # This preserves start, end, and all other fields
+                translated_seg['text'] = translated_text  # Only update the text field
+                translated_seg['original_text'] = text  # Store original for reference
+                
+                # CRITICAL: Ensure start and end timestamps are explicitly preserved
+                if 'start' not in translated_seg:
+                    translated_seg['start'] = original_seg.get('start', 0.0)
+                if 'end' not in translated_seg:
+                    translated_seg['end'] = original_seg.get('end', original_seg.get('start', 0.0) + 2.0)
+                
+                translated_segments.append(translated_seg)
+            except Exception as e:
+                # If translation fails, keep original text but preserve structure
+                print(f"⚠️  Failed to translate segment {i+1}: {e}")
+                translated_seg = original_seg.copy()
+                translated_seg['original_text'] = text
+                # Ensure timestamps are preserved
+                if 'start' not in translated_seg:
+                    translated_seg['start'] = original_seg.get('start', 0.0)
+                if 'end' not in translated_seg:
+                    translated_seg['end'] = original_seg.get('end', original_seg.get('start', 0.0) + 2.0)
+                translated_segments.append(translated_seg)
+        
+        return translated_segments
     
     @property
     def translation_service(self):

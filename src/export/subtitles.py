@@ -87,12 +87,18 @@ class SubtitleGenerator:
             output_path: Optional output file path
             source_file: Original source file (for naming)
             use_paragraphs: Use paragraph-level segmentation instead of segments
-            translated_text: Optional translated text to use instead of original
-            translated_segments: Optional translated segments with timestamps
+            translated_text: Optional translated text (IGNORED if translated_segments is provided)
+            translated_segments: Optional translated segments with timestamps (PREFERRED)
             
         Returns:
             Path to generated SRT file
         """
+        # CRITICAL: If translated_segments is provided, ignore translated_text completely
+        # translated_text contains the full document translation and should NEVER be used
+        # for individual segments - each segment must have its own translation
+        if translated_segments:
+            translated_text = None
+        
         if output_path is None:
             if source_file:
                 base_name = source_file.stem
@@ -105,10 +111,9 @@ class SubtitleGenerator:
         # Ensure directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Get segments or paragraphs
-        if translated_segments:
-            items = translated_segments
-        elif use_paragraphs:
+        # Get segments or paragraphs - ALWAYS use original segments from transcription_data
+        # Never use translated_segments as the base items - they're only for matching translations
+        if use_paragraphs:
             items = transcription_data.get('paragraphs', [])
             if not items:
                 # Fallback to segments if paragraphs not available
@@ -124,15 +129,23 @@ class SubtitleGenerator:
         subtitle_index = 1
         
         # Get original segments/paragraphs for dual-language support
+        # CRITICAL: Always use original segments from transcription_data, not translated_segments
         original_items = items
         translated_items = translated_segments if translated_segments else []
         
         # Create mapping of original to translated items by timestamp
+        # Use tolerance-based matching to handle floating point precision issues
         translated_map = {}
         if translated_items:
             for t_item in translated_items:
                 start = t_item.get('start', 0.0)
-                translated_map[start] = t_item
+                # Use timestamp as key (with rounding to handle precision issues)
+                key = round(start, 3)  # Round to 3 decimal places (millisecond precision)
+                translated_map[key] = t_item
+                # Also try with 2 decimal places as fallback
+                key2 = round(start, 2)
+                if key2 not in translated_map:
+                    translated_map[key2] = t_item
         
         for item in original_items:
             # Get start and end times
@@ -142,20 +155,40 @@ class SubtitleGenerator:
             # Get original text
             original_text = item.get('text', '')
             
-            # Get translated text if available
-            translated_item = translated_map.get(start_time)
+            # Get translated text if available - use rounded timestamp for matching
+            start_key = round(start_time, 3)  # Round to 3 decimal places for matching
+            translated_item = translated_map.get(start_key)
+            
+            # If not found with 3 decimals, try 2 decimals
+            if not translated_item:
+                start_key = round(start_time, 2)
+                translated_item = translated_map.get(start_key)
+            
+            # If still not found, try exact match (for cases where timestamps are exact)
+            if not translated_item and start_time in translated_map:
+                translated_item = translated_map[start_time]
+            
             translated_text_item = translated_item.get('text', '') if translated_item else None
             
-            # If no translated item found but translated_text provided, use it
-            if not translated_text_item and translated_text:
-                translated_text_item = translated_text
+            # Debug logging for first few segments
+            if subtitle_index <= 3:
+                print(f"   Subtitle {subtitle_index}: start={start_time}, matched={translated_item is not None}, "
+                      f"translated_length={len(translated_text_item) if translated_text_item else 0}")
+            
+            # CRITICAL: Never use full translated_text for subtitle segments
+            # Each segment must have its own translation from translated_segments
+            # If no match found, use original text only - NEVER fallback to full translated_text
+            if not translated_text_item or not translated_text_item.strip():
+                # No translation for this specific segment - use original only
+                # DO NOT use translated_text parameter - it contains the full document translation
+                translated_text_item = None
             
             # Build subtitle text: include both original and translated if available
             if translated_text_item and translated_text_item.strip():
                 # Dual-language subtitle: Original / Translated
                 text = f"{original_text}\n{translated_text_item}"
             else:
-                # Original only
+                # Original only (no translation for this specific segment)
                 text = original_text
             
             if not text.strip():
@@ -202,12 +235,18 @@ class SubtitleGenerator:
             output_path: Optional output file path
             source_file: Original source file (for naming)
             use_paragraphs: Use paragraph-level segmentation instead of segments
-            translated_text: Optional translated text to use instead of original
-            translated_segments: Optional translated segments with timestamps
+            translated_text: Optional translated text (IGNORED if translated_segments is provided)
+            translated_segments: Optional translated segments with timestamps (PREFERRED)
             
         Returns:
             Path to generated VTT file
         """
+        # CRITICAL: If translated_segments is provided, ignore translated_text completely
+        # translated_text contains the full document translation and should NEVER be used
+        # for individual segments - each segment must have its own translation
+        if translated_segments:
+            translated_text = None
+        
         if output_path is None:
             if source_file:
                 base_name = source_file.stem
@@ -220,10 +259,9 @@ class SubtitleGenerator:
         # Ensure directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Get segments or paragraphs
-        if translated_segments:
-            items = translated_segments
-        elif use_paragraphs:
+        # Get segments or paragraphs - ALWAYS use original segments from transcription_data
+        # Never use translated_segments as the base items - they're only for matching translations
+        if use_paragraphs:
             items = transcription_data.get('paragraphs', [])
             if not items:
                 # Fallback to segments if paragraphs not available
@@ -238,17 +276,27 @@ class SubtitleGenerator:
         vtt_lines = ["WEBVTT", ""]  # VTT header
         
         # Get original segments/paragraphs for dual-language support
+        # CRITICAL: Always use original segments from transcription_data, not translated_segments
         original_items = items
         translated_items = translated_segments if translated_segments else []
         
         # Create mapping of original to translated items by timestamp
+        # Use tolerance-based matching to handle floating point precision issues
         translated_map = {}
         if translated_items:
             for t_item in translated_items:
                 start = t_item.get('start', 0.0)
-                translated_map[start] = t_item
+                # Use timestamp as key (with rounding to handle precision issues)
+                key = round(start, 3)  # Round to 3 decimal places (millisecond precision)
+                translated_map[key] = t_item
+                # Also try with 2 decimal places as fallback
+                key2 = round(start, 2)
+                if key2 not in translated_map:
+                    translated_map[key2] = t_item
         
+        vtt_entry_index = 0
         for item in original_items:
+            vtt_entry_index += 1
             # Get start and end times
             start_time = item.get('start', 0.0)
             end_time = item.get('end', start_time + 2.0)  # Default 2 seconds if end missing
@@ -256,20 +304,40 @@ class SubtitleGenerator:
             # Get original text
             original_text = item.get('text', '')
             
-            # Get translated text if available
-            translated_item = translated_map.get(start_time)
+            # Get translated text if available - use rounded timestamp for matching
+            start_key = round(start_time, 3)  # Round to 3 decimal places for matching
+            translated_item = translated_map.get(start_key)
+            
+            # If not found with 3 decimals, try 2 decimals
+            if not translated_item:
+                start_key = round(start_time, 2)
+                translated_item = translated_map.get(start_key)
+            
+            # If still not found, try exact match (for cases where timestamps are exact)
+            if not translated_item and start_time in translated_map:
+                translated_item = translated_map[start_time]
+            
             translated_text_item = translated_item.get('text', '') if translated_item else None
             
-            # If no translated item found but translated_text provided, use it
-            if not translated_text_item and translated_text:
-                translated_text_item = translated_text
+            # Debug logging for first few entries
+            if vtt_entry_index <= 3:
+                print(f"   VTT Entry {vtt_entry_index}: start={start_time}, matched={translated_item is not None}, "
+                      f"translated_length={len(translated_text_item) if translated_text_item else 0}")
+            
+            # CRITICAL: Never use full translated_text for subtitle segments
+            # Each segment must have its own translation from translated_segments
+            # If no match found, use original text only - NEVER fallback to full translated_text
+            if not translated_text_item or not translated_text_item.strip():
+                # No translation for this specific segment - use original only
+                # DO NOT use translated_text parameter - it contains the full document translation
+                translated_text_item = None
             
             # Build subtitle text: include both original and translated if available
             if translated_text_item and translated_text_item.strip():
                 # Dual-language subtitle: Original / Translated
                 text = f"{original_text}\n{translated_text_item}"
             else:
-                # Original only
+                # Original only (no translation for this specific segment)
                 text = original_text
             
             if not text.strip():
@@ -313,12 +381,16 @@ class SubtitleGenerator:
             base_name: Base name for output files (without extension)
             source_file: Original source file (for naming)
             use_paragraphs: Use paragraph-level segmentation
-            translated_text: Optional translated text
-            translated_segments: Optional translated segments
+            translated_text: Optional translated text (IGNORED if translated_segments is provided)
+            translated_segments: Optional translated segments (PREFERRED)
             
         Returns:
             Dictionary with 'srt' and 'vtt' keys pointing to file paths
         """
+        # CRITICAL: If translated_segments is provided, ignore translated_text completely
+        if translated_segments:
+            translated_text = None
+        
         if base_name is None:
             if source_file:
                 base_name = source_file.stem

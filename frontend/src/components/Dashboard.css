@@ -186,14 +186,16 @@
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  background: var(--corporate-blue);
-  color: white;
+  background: var(--corporate-white);
+  color: var(--corporate-blue);
+  border: 1px solid var(--corporate-blue);
   border-radius: 4px;
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
   margin-bottom: 8px;
 }
+
 
 .project-icon {
   font-size: 16px;

@@ -71,7 +71,7 @@ class RAGQAEngine:
             )
             self.reranker = ReRanker()
             self.validator = ResponseValidator(use_llm=True)
-            self.refiner = AnswerRefiner(use_llm=True)
+            self.refiner = AnswerRefiner(use_llm=True, embedder=self.embedder)  # Pass embedder for semantic filtering
         else:
             self.query_rewriter = None
             self.hybrid_search = None
@@ -178,7 +178,7 @@ class RAGQAEngine:
             
             if paragraphs:
                 # Use existing paragraphs
-            for para in paragraphs:
+              for para in paragraphs:
                 text = para.get('text', '')
                 if text and text.strip():
                     texts_to_index.append(text)
@@ -377,7 +377,7 @@ class RAGQAEngine:
             base_threshold = min_similarity
             multilingual_threshold = base_threshold * 0.7  # 30% more lenient
             
-        filtered_results = [
+            filtered_results = [
             (meta, score) for meta, score in results
                 if score >= multilingual_threshold
             ]
@@ -392,6 +392,47 @@ class RAGQAEngine:
                     print(f"📊 Using lenient threshold for multilingual matching. Top score: {top_score:.3f}")
         else:
             filtered_results = []
+        
+        # Step 3.5: Semantic relevance filtering (remove false positives)
+        if filtered_results and use_advanced and self.embedder:
+            import numpy as np
+            # Re-check relevance using semantic similarity for top results
+            # This catches cases where keyword matching gives false positives
+            try:
+                question_embedding = self.embedder.embed_text(original_question)
+                question_norm = question_embedding / (np.linalg.norm(question_embedding) or 1.0)
+                
+                semantically_filtered = []
+                for meta, score in filtered_results[:top_k * 2]:  # Check top 2x results
+                    chunk_text = meta.get('text', '') or meta.get('content', '') or meta.get('chunk_text', '')
+                    if not chunk_text:
+                        continue
+                    
+                    # Compute semantic similarity
+                    chunk_embedding = self.embedder.embed_text(chunk_text)
+                    chunk_norm = chunk_embedding / (np.linalg.norm(chunk_embedding) or 1.0)
+                    semantic_similarity = float(np.dot(question_norm, chunk_norm))
+                    
+                    # Use STRICTER threshold for semantic filtering (0.55 for multilingual)
+                    # This is higher than initial retrieval threshold to remove false positives
+                    # For multilingual content, we need higher threshold to avoid topic confusion
+                    semantic_threshold = 0.55  # Increased from 0.45 to 0.55
+                    if semantic_similarity >= semantic_threshold:
+                        semantically_filtered.append((meta, score))
+                    else:
+                        print(f"🔍 Semantic filter removed chunk (sim: {semantic_similarity:.3f} < {semantic_threshold}): {chunk_text[:80]}...")
+                
+                # If semantic filtering removed too many, keep at least top_k
+                if len(semantically_filtered) >= top_k:
+                    filtered_results = semantically_filtered
+                elif len(semantically_filtered) > 0:
+                    # Keep semantic filtered + top from original to ensure we have enough
+                    remaining_needed = top_k - len(semantically_filtered)
+                    remaining = [(meta, score) for meta, score in filtered_results if (meta, score) not in semantically_filtered]
+                    filtered_results = semantically_filtered + remaining[:remaining_needed]
+                # If all filtered out, keep original (don't break the pipeline)
+            except Exception as e:
+                print(f"⚠️  Semantic filtering failed: {e}, using original results")
         
         # Early exit optimization: If no results found, skip remaining steps
         if not filtered_results:
@@ -449,8 +490,9 @@ class RAGQAEngine:
                 # Check average similarity of top results
                 avg_similarity = sum(score for _, score in filtered_results[:3]) / len(filtered_results[:3]) if filtered_results[:3] else 0
                 if avg_similarity < 0.15:
+
                     # Very low similarity - do additional check
-            context_relevant = self.refiner._check_context_relevance(
+                    context_relevant = self.refiner._check_context_relevance(
                 original_question,
                 retrieved_chunks,
                 min_similarity

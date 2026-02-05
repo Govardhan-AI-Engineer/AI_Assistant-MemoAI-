@@ -128,7 +128,7 @@ function TranslationPanel({ user, transcript, onLanguageChange, onNavigateToNote
           <div className="translation-text">{translation.translated_text}</div>
           <div className="translation-meta">
             <span>Provider: {translation.provider || 'unknown'}</span>
-            <span>Language: {translation.target_language}</span>
+            <span>Language: {translation.target_language || targetLanguage || 'unknown'}</span>
           </div>
           
           {/* Generate Notes Section */}
@@ -136,19 +136,20 @@ function TranslationPanel({ user, transcript, onLanguageChange, onNavigateToNote
             <div className="generate-notes-section">
               <h4>Generate Notes</h4>
               <p className="notes-description">
-                Generate summary and key points in <strong>{translation.target_language.toUpperCase()}</strong>
+                Generate summary and key points in <strong>{(translation.target_language || targetLanguage || 'English').toUpperCase()}</strong>
               </p>
               <div className="notes-buttons">
                 <button
                   className="btn-generate-notes"
                   onClick={() => {
                     // Notify parent to switch to notes tab with target language
+                    const lang = translation.target_language || targetLanguage || 'en'
                     if (onLanguageChange) {
-                      onLanguageChange(translation.target_language)
+                      onLanguageChange(lang)
                     }
                     // Navigate to notes tab
                     if (onNavigateToNotes) {
-                      onNavigateToNotes(translation.target_language)
+                      onNavigateToNotes(lang)
                     }
                   }}
                 >

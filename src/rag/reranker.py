@@ -82,6 +82,14 @@ class ReRanker:
         if not self.model or not results:
             return results
         
+        # CRITICAL FIX: Skip reranking for non-English queries
+        # ms-marco models are trained on English and don't work well for other languages
+        # This can cause irrelevant chunks to get high scores
+        query_lang = self._detect_language(query)
+        if query_lang != 'en':
+            print(f"⚠️  Skipping reranking for {query_lang} query (reranker models are English-only)")
+            return results  # Return original results without reranking
+        
         if top_k is None:
             top_k = len(results)
         
@@ -115,3 +123,23 @@ class ReRanker:
     def is_available(self) -> bool:
         """Check if re-ranker is available"""
         return self.model is not None
+    
+    def _detect_language(self, text: str) -> str:
+        """Simple language detection for reranker"""
+        if not text:
+            return 'en'
+        
+        # Check for Devanagari script (Hindi, Marathi, etc.)
+        if any('\u0900' <= char <= '\u097F' for char in text):
+            return 'hi'
+        
+        # Check for Telugu script
+        if any('\u0C00' <= char <= '\u0C7F' for char in text):
+            return 'te'
+        
+        # Check for Tamil script
+        if any('\u0B80' <= char <= '\u0BFF' for char in text):
+            return 'ta'
+        
+        # Default to English
+        return 'en'
