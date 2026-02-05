@@ -86,6 +86,12 @@ class RobustTranscriptionTranslationIntegration:
                 "Transcription result must include 'language' field."
             )
         
+        # Language-specific provider preference
+        # For Telugu to any language, prefer AI translation (Groq) as it works better
+        if not preferred_provider and source_language == 'te':
+            preferred_provider = 'ai'
+            print(f"💡 Telugu to {target_language.upper()} detected - using AI translation for better accuracy")
+        
         # Translate using robust translator
         if use_two_step:
             translation_result = self.robust_translator.translate_two_step(

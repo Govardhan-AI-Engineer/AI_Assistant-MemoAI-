@@ -2669,9 +2669,11 @@ async def rag_query(
     user_id: int = Form(...),
     top_k: int = Form(10),  # Increased default for better fact coverage
     min_similarity: float = Form(0.2),  # Lower default for better multilingual support
-    use_advanced: bool = Form(True)
+    use_advanced: bool = Form(True),
+    conversation_id: Optional[int] = Form(None),
+    session_id: Optional[str] = Form(None)
 ):
-    """Query Advanced RAG system with a question"""
+    """Query Advanced RAG system with a question (supports conversation context)"""
     try:
         from src.rag import RAGQAEngine
         from src.memory import StorageService
@@ -2689,12 +2691,18 @@ async def rag_query(
             top_k=top_k,
             min_similarity=min_similarity,
             include_citations=True,
-            use_advanced=use_advanced
+            use_advanced=use_advanced,
+            conversation_id=conversation_id,
+            session_id=session_id
         )
         
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"❌ RAG Query Error: {e}")
+        print(f"Full traceback:\n{error_trace}")
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
 
 @app.post("/api/rag/query/stream")
@@ -2703,9 +2711,11 @@ async def rag_query_stream(
     user_id: int = Form(...),
     top_k: int = Form(10),
     min_similarity: float = Form(0.2),
-    use_advanced: bool = Form(True)
+    use_advanced: bool = Form(True),
+    conversation_id: Optional[int] = Form(None),
+    session_id: Optional[str] = Form(None)
 ):
-    """Stream RAG query response using Server-Sent Events"""
+    """Stream RAG query response using Server-Sent Events (supports conversation context)"""
     async def generate_stream():
         try:
             from src.rag import RAGQAEngine
@@ -2718,6 +2728,31 @@ async def rag_query_stream(
                 translation_service=translation_integration,
                 enable_advanced=use_advanced
             )
+            
+            # Handle conversation context
+            conversation_history = []
+            current_conversation_id = conversation_id
+            current_session_id = session_id
+            
+            if session_id or conversation_id:
+                if session_id and not conversation_id:
+                    conv = storage.get_conversation(user_id=user_id, session_id=session_id)
+                    if conv:
+                        current_conversation_id = conv['conversation_id']
+                    else:
+                        query_lang = qa_engine.detect_query_language(question)
+                        new_conv = storage.create_conversation(
+                            user_id=user_id,
+                            session_id=session_id,
+                            language=query_lang
+                        )
+                        current_conversation_id = new_conv['conversation_id']
+                        current_session_id = new_conv['session_id']
+                
+                if current_conversation_id:
+                    conv = storage.get_conversation(user_id=user_id, conversation_id=current_conversation_id)
+                    if conv and conv.get('messages'):
+                        conversation_history = conv['messages'][-10:]
             
             # Detect language
             query_lang = qa_engine.detect_query_language(question)
@@ -2759,7 +2794,8 @@ async def rag_query_stream(
                     question=question,
                     retrieved_chunks=retrieved_chunks,
                     language=query_lang,
-                    max_length=500
+                    max_length=500,
+                    conversation_history=conversation_history
                 ):
                     full_answer += chunk
                     yield f"data: {json.dumps({'type': 'answer_chunk', 'content': chunk})}\n\n"
@@ -2770,12 +2806,32 @@ async def rag_query_stream(
                     text = meta.get('text', '')
                     if text:
                         answer_parts.append(text)
-                answer = ' '.join(answer_parts)
+                full_answer = ' '.join(answer_parts)
                 # Stream word by word for effect
-                words = answer.split()
+                words = full_answer.split()
                 for word in words:
                     yield f"data: {json.dumps({'type': 'answer_chunk', 'content': word + ' '})}\n\n"
                     await asyncio.sleep(0.01)  # Small delay for streaming effect
+            
+            # Save to conversation if using conversation context
+            if current_conversation_id and full_answer:
+                try:
+                    storage.add_message(
+                        user_id=user_id,
+                        conversation_id=current_conversation_id,
+                        role='user',
+                        content=question,
+                        metadata={'language': query_lang}
+                    )
+                    storage.add_message(
+                        user_id=user_id,
+                        conversation_id=current_conversation_id,
+                        role='assistant',
+                        content=full_answer,
+                        metadata={'language': query_lang, 'num_chunks': len(retrieved_chunks)}
+                    )
+                except Exception as e:
+                    print(f"⚠️  Failed to save conversation message: {e}")
             
             # Send citations
             citations = []
@@ -2788,7 +2844,7 @@ async def rag_query_stream(
                 })
             
             yield f"data: {json.dumps({'type': 'citations', 'citations': citations})}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'conversation_id': current_conversation_id, 'session_id': current_session_id})}\n\n"
             
         except Exception as e:
             print(f"❌ Streaming error: {e}")
@@ -2805,6 +2861,134 @@ async def rag_query_stream(
             "X-Accel-Buffering": "no"
         }
     )
+
+
+# ==================== Conversation Management Endpoints ====================
+
+@app.post("/api/conversations/create")
+async def create_conversation(
+    user_id: int = Form(...),
+    session_id: Optional[str] = Form(None),
+    title: Optional[str] = Form(None),
+    language: Optional[str] = Form(None)
+):
+    """Create a new conversation session"""
+    try:
+        from src.memory import StorageService
+        
+        storage = StorageService()
+        conversation = storage.create_conversation(
+            user_id=user_id,
+            session_id=session_id,
+            title=title,
+            language=language
+        )
+        
+        return conversation
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/conversations")
+async def list_conversations(
+    user_id: int,
+    limit: int = 50
+):
+    """Get all conversations for a user"""
+    try:
+        from src.memory import StorageService
+        
+        storage = StorageService()
+        conversations = storage.get_user_conversations(
+            user_id=user_id,
+            limit=limit
+        )
+        
+        return {
+            'conversations': conversations,
+            'count': len(conversations)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/conversations/{conversation_id}")
+async def get_conversation(
+    conversation_id: int,
+    user_id: int,
+    limit_messages: int = 100
+):
+    """Get a specific conversation with messages (limited for performance)"""
+    try:
+        from src.memory import StorageService
+        
+        storage = StorageService()
+        conversation = storage.get_conversation(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            limit_messages=limit_messages
+        )
+        
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        return conversation
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/conversations/session/{session_id}")
+async def get_conversation_by_session(
+    session_id: str,
+    user_id: int,
+    limit_messages: int = 100
+):
+    """Get a conversation by session ID (limited for performance)"""
+    try:
+        from src.memory import StorageService
+        
+        storage = StorageService()
+        conversation = storage.get_conversation(
+            user_id=user_id,
+            session_id=session_id,
+            limit_messages=limit_messages
+        )
+        
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        return conversation
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: int,
+    user_id: int
+):
+    """Delete a conversation and all its messages"""
+    try:
+        from src.memory import StorageService
+        
+        storage = StorageService()
+        deleted = storage.delete_conversation(
+            user_id=user_id,
+            conversation_id=conversation_id
+        )
+        
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        return {'success': True, 'message': 'Conversation deleted'}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/rag/stats")

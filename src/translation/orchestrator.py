@@ -142,6 +142,12 @@ class TranslationOrchestrator:
         if not text or not text.strip():
             return text, "none", False, None
         
+        # Language-specific provider preference
+        # For Telugu to any language, prefer AI translation (Groq) as it works better
+        if not preferred_provider:
+            if source_language == 'te':
+                preferred_provider = 'ai'
+        
         # Start with preferred provider if specified and available
         providers_to_try = []
         preferred_was_available = False

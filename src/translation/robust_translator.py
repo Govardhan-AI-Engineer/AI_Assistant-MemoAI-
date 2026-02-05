@@ -94,6 +94,13 @@ class RobustTranslator:
                 "Auto-detection is disabled for robust translation."
             )
         
+        # Language-specific provider preference
+        # For Telugu to any language, prefer AI translation (Groq) as it works better
+        if not preferred_provider:
+            if source_language == 'te':
+                preferred_provider = 'ai'
+                print(f"💡 Telugu to {target_language.upper()} detected - using AI translation for better accuracy")
+        
         # Step 1: Normalize text
         should_normalize = normalize_text if normalize_text is not None else self.enable_normalization
         normalized_text = text

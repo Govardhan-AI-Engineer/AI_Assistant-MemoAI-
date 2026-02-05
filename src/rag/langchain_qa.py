@@ -229,7 +229,8 @@ Provide a clear, comprehensive answer using ONLY information from the context. E
         self,
         question: str,
         context_chunks: List[Dict[str, Any]],
-        language: str = 'en'
+        language: str = 'en',
+        conversation_history: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """
         Generate answer using LangChain with universal language support
@@ -249,6 +250,19 @@ Provide a clear, comprehensive answer using ONLY information from the context. E
         # Prepare context
         context_text = self._format_context(context_chunks)
         
+        # Build conversation history context if available
+        conversation_context = ""
+        if conversation_history and len(conversation_history) > 0:
+            conv_parts = []
+            for msg in conversation_history[-5:]:  # Last 5 messages
+                if msg.get('role') == 'user':
+                    conv_parts.append(f"Previous question: {msg.get('content', '')[:150]}")
+                elif msg.get('role') == 'assistant':
+                    conv_parts.append(f"Previous answer: {msg.get('content', '')[:200]}")
+            
+            if conv_parts:
+                conversation_context = f"\n\nPREVIOUS CONVERSATION CONTEXT:\n{chr(10).join(conv_parts)}\n\nCURRENT QUESTION (may be a follow-up):\n"
+        
         # Get language-specific prompts
         system_prompt, user_template = self._create_multilingual_prompt(language)
         
@@ -264,7 +278,7 @@ Provide a clear, comprehensive answer using ONLY information from the context. E
             
             # Generate answer
             answer = chain.invoke({
-                "question": question,
+                "question": question + conversation_context,
                 "context": context_text
             })
             

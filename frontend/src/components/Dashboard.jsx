@@ -4,6 +4,7 @@ import TranslationPanel from './TranslationPanel'
 import TranscriptsList from './TranscriptsList'
 import ExportsList from './ExportsList'
 import RAGPanel from './RAGPanel'
+import ConversationsPanel from './ConversationsPanel'
 import NotesPanel from './NotesPanel'
 import TagsPanel from './TagsPanel'
 import ExportButton from './ExportButton'
@@ -16,6 +17,8 @@ function Dashboard({ user, onLogout }) {
   const [transcriptView, setTranscriptView] = useState('all') // 'all', 'search', 'filter'
   const [exportFilter, setExportFilter] = useState('all') // 'all', 'subtitle', 'document', 'audio'
   const [activeSubTab, setActiveSubTab] = useState('transcription') // 'transcription', 'translation', 'notes', 'tags'
+  const [ragSubTab, setRagSubTab] = useState('query') // 'query', 'history'
+  const [selectedConversation, setSelectedConversation] = useState(null)
 
   return (
     <div className="dashboard">
@@ -56,7 +59,7 @@ function Dashboard({ user, onLogout }) {
           </nav>
         </div>
         <div className="header-right">
-          <div className="notification-icon">🔔</div>
+          {/* <div className="notification-icon">🔔</div> */}
           <div className="user-profile">
             <div className="user-avatar">
               {user.user?.username?.charAt(0).toUpperCase() || 'U'}
@@ -124,8 +127,8 @@ function Dashboard({ user, onLogout }) {
               <span>Notes & Tags</span>
             </div>
             <div className="sidebar-item">
-              <span className="sidebar-icon">⚙️</span>
-              <span>Settings</span>
+              {/* <span className="sidebar-icon">⚙️</span> */}
+              {/* <span>Settings</span> */}
             </div>
           </div>
         </aside>
@@ -216,9 +219,24 @@ function Dashboard({ user, onLogout }) {
             )}
             {activeTab === 'rag' && (
               <>
-                <button className="sub-nav-tab active">Query</button>
-                <button className="sub-nav-tab">Indexing</button>
-                <button className="sub-nav-tab">Stats</button>
+                <button 
+                  className={`sub-nav-tab ${ragSubTab === 'query' ? 'active' : ''}`}
+                  onClick={() => {
+                    setRagSubTab('query')
+                    // If conversation is selected, keep it; otherwise clear
+                    if (!selectedConversation) {
+                      setSelectedConversation(null)
+                    }
+                  }}
+                >
+                  Query
+                </button>
+                <button 
+                  className={`sub-nav-tab ${ragSubTab === 'history' ? 'active' : ''}`}
+                  onClick={() => setRagSubTab('history')}
+                >
+                  History
+                </button>
               </>
             )}
           </div>
@@ -408,7 +426,30 @@ function Dashboard({ user, onLogout }) {
 
             {activeTab === 'rag' && (
               <div className="single-panel">
-                <RAGPanel user={user} />
+                {ragSubTab === 'query' && (
+                  <RAGPanel 
+                    user={user} 
+                    selectedConversation={selectedConversation}
+                    onConversationChange={(conv) => {
+                      setSelectedConversation(conv)
+                      // Switch to query tab when conversation is selected from history
+                      if (conv) {
+                        setRagSubTab('query')
+                      }
+                    }}
+                  />
+                )}
+                {ragSubTab === 'history' && (
+                  <ConversationsPanel 
+                    user={user}
+                    selectedConversationId={selectedConversation?.conversation_id || selectedConversation?.id}
+                    onSelectConversation={(conv) => {
+                      setSelectedConversation(conv)
+                      // Switch to query tab when conversation is selected
+                      setRagSubTab('query')
+                    }}
+                  />
+                )}
               </div>
             )}
           </div>

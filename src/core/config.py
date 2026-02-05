@@ -29,10 +29,10 @@ class Config:
     
     # Translation settings
     DEFAULT_TRANSLATION_SERVICE = os.getenv("DEFAULT_TRANSLATION_SERVICE", "google")
-    TRANSLATION_SERVICES = ["google", "libre", "deepl"]
+    TRANSLATION_SERVICES = ["google", "libre", "deepl", "ai"]  # Added "ai" to services
     TRANSLATION_PROVIDER_PRIORITY = os.getenv(
         "TRANSLATION_PROVIDER_PRIORITY",
-        "google,libre,deepl"
+        "google,libre,deepl,ai"  # AI added as fallback (will be preferred for Telugu automatically)
     ).split(",")
     ENABLE_RETRANSLATION = os.getenv("ENABLE_RETRANSLATION", "true").lower() == "true"
     

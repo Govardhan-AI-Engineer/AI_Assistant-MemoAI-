@@ -5,12 +5,13 @@ Ensures user isolation and immutable document storage
 import secrets
 from typing import Optional, Dict, List, Any
 from datetime import datetime
-from sqlalchemy import create_engine, and_
+from sqlalchemy import create_engine, and_, func
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import IntegrityError
 
 from src.memory.models import (
-    Transcript, Translation, Note, Tag, TranscriptTag, NoteTag, ExportFile
+    Transcript, Translation, Note, Tag, TranscriptTag, NoteTag, ExportFile,
+    Conversation, ConversationMessage
 )
 from src.core.config import Config
 from src.core.config import Config
@@ -1007,6 +1008,297 @@ class StorageService:
         except Exception as e:
             db.rollback()
             print(f"Error removing tag from transcript: {e}")
+            return False
+        finally:
+            db.close()
+    
+    # ==================== Conversation Management ====================
+    
+    def create_conversation(
+        self,
+        user_id: int,
+        session_id: Optional[str] = None,
+        title: Optional[str] = None,
+        language: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a new conversation session
+        
+        Args:
+            user_id: User ID
+            session_id: Optional session ID (auto-generated if not provided)
+            title: Optional conversation title (auto-generated from first question if not provided)
+            language: Optional primary language of conversation
+            
+        Returns:
+            Dictionary with conversation_id, session_id, created_at
+        """
+        db: Session = self.SessionLocal()
+        try:
+            if not session_id:
+                session_id = secrets.token_urlsafe(32)
+            
+            conversation = Conversation(
+                session_id=session_id,
+                user_id=user_id,
+                title=title,
+                language=language
+            )
+            
+            db.add(conversation)
+            db.commit()
+            db.refresh(conversation)
+            
+            return {
+                'conversation_id': conversation.id,
+                'session_id': conversation.session_id,
+                'title': conversation.title,
+                'language': conversation.language,
+                'created_at': conversation.created_at.isoformat() if conversation.created_at else None
+            }
+        except IntegrityError:
+            db.rollback()
+            # Session ID already exists, try again with new ID
+            return self.create_conversation(user_id, None, title, language)
+        except Exception as e:
+            db.rollback()
+            print(f"Error creating conversation: {e}")
+            raise
+        finally:
+            db.close()
+    
+    def get_conversation(
+        self,
+        user_id: int,
+        session_id: Optional[str] = None,
+        conversation_id: Optional[int] = None,
+        limit_messages: int = 100
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get conversation by session_id or conversation_id
+        
+        Args:
+            user_id: User ID
+            session_id: Session ID (optional)
+            conversation_id: Conversation ID (optional)
+            limit_messages: Maximum number of messages to load (default: 100)
+            
+        Returns:
+            Conversation dictionary with messages, or None if not found
+        """
+        db: Session = self.SessionLocal()
+        try:
+            if session_id:
+                conversation = db.query(Conversation).filter(
+                    and_(
+                        Conversation.session_id == session_id,
+                        Conversation.user_id == user_id
+                    )
+                ).first()
+            elif conversation_id:
+                conversation = db.query(Conversation).filter(
+                    and_(
+                        Conversation.id == conversation_id,
+                        Conversation.user_id == user_id
+                    )
+                ).first()
+            else:
+                return None
+            
+            if not conversation:
+                return None
+            
+            # Get messages with limit - only load recent messages for performance
+            # Order by created_at DESC to get most recent, then reverse to show chronologically
+            messages = db.query(ConversationMessage).filter(
+                ConversationMessage.conversation_id == conversation.id
+            ).order_by(ConversationMessage.created_at.desc()).limit(limit_messages).all()
+            
+            # Reverse to show in chronological order (oldest first)
+            messages = list(reversed(messages))
+            
+            # Get total message count for pagination info
+            total_messages = db.query(func.count(ConversationMessage.id)).filter(
+                ConversationMessage.conversation_id == conversation.id
+            ).scalar()
+            
+            return {
+                'conversation_id': conversation.id,
+                'session_id': conversation.session_id,
+                'title': conversation.title,
+                'language': conversation.language,
+                'created_at': conversation.created_at.isoformat() if conversation.created_at else None,
+                'updated_at': conversation.updated_at.isoformat() if conversation.updated_at else None,
+                'messages': [
+                    {
+                        'id': msg.id,
+                        'role': msg.role,
+                        'content': msg.content,
+                        'metadata': msg.message_metadata or {},
+                        'created_at': msg.created_at.isoformat() if msg.created_at else None
+                    }
+                    for msg in messages
+                ],
+                'total_messages': total_messages,
+                'loaded_messages': len(messages)
+            }
+        except Exception as e:
+            print(f"Error getting conversation: {e}")
+            return None
+        finally:
+            db.close()
+    
+    def get_user_conversations(
+        self,
+        user_id: int,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all conversations for a user (most recent first)
+        
+        Args:
+            user_id: User ID
+            limit: Maximum number of conversations to return
+            
+        Returns:
+            List of conversation dictionaries (without messages)
+        """
+        db: Session = self.SessionLocal()
+        try:
+            # Use a JOIN with COUNT to efficiently count messages in a single query
+            # This avoids N+1 query problem when accessing conv.messages
+            conversations = db.query(
+                Conversation,
+                func.count(ConversationMessage.id).label('message_count')
+            ).outerjoin(
+                ConversationMessage,
+                Conversation.id == ConversationMessage.conversation_id
+            ).filter(
+                Conversation.user_id == user_id
+            ).group_by(Conversation.id).order_by(
+                Conversation.updated_at.desc()
+            ).limit(limit).all()
+            
+            return [
+                {
+                    'conversation_id': conv.id,
+                    'session_id': conv.session_id,
+                    'title': conv.title,
+                    'language': conv.language,
+                    'created_at': conv.created_at.isoformat() if conv.created_at else None,
+                    'updated_at': conv.updated_at.isoformat() if conv.updated_at else None,
+                    'message_count': count  # Use the count from the query
+                }
+                for conv, count in conversations
+            ]
+        except Exception as e:
+            print(f"Error getting user conversations: {e}")
+            return []
+        finally:
+            db.close()
+    
+    def add_message(
+        self,
+        user_id: int,
+        conversation_id: int,
+        role: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Add a message to a conversation
+        
+        Args:
+            user_id: User ID
+            conversation_id: Conversation ID
+            role: 'user' or 'assistant'
+            content: Message content
+            metadata: Optional metadata (citations, chunks, etc.)
+            
+        Returns:
+            Dictionary with message_id, created_at
+        """
+        db: Session = self.SessionLocal()
+        try:
+            # Verify conversation belongs to user
+            conversation = db.query(Conversation).filter(
+                and_(
+                    Conversation.id == conversation_id,
+                    Conversation.user_id == user_id
+                )
+            ).first()
+            
+            if not conversation:
+                raise ValueError(f"Conversation {conversation_id} not found or doesn't belong to user {user_id}")
+            
+            # Create message
+            message = ConversationMessage(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                role=role,
+                content=content,
+                message_metadata=metadata
+            )
+            
+            db.add(message)
+            
+            # Update conversation timestamp and title if first message
+            conversation.updated_at = datetime.utcnow()
+            if not conversation.title and role == 'user':
+                # Auto-generate title from first question (first 50 chars)
+                conversation.title = content[:50] + ('...' if len(content) > 50 else '')
+            
+            db.commit()
+            db.refresh(message)
+            
+            return {
+                'message_id': message.id,
+                'conversation_id': conversation_id,
+                'role': message.role,
+                'content': message.content,
+                'metadata': message.message_metadata or {},
+                'created_at': message.created_at.isoformat() if message.created_at else None
+            }
+        except Exception as e:
+            db.rollback()
+            print(f"Error adding message: {e}")
+            raise
+        finally:
+            db.close()
+    
+    def delete_conversation(
+        self,
+        user_id: int,
+        conversation_id: int
+    ) -> bool:
+        """
+        Delete a conversation and all its messages
+        
+        Args:
+            user_id: User ID
+            conversation_id: Conversation ID
+            
+        Returns:
+            True if deleted, False if not found
+        """
+        db: Session = self.SessionLocal()
+        try:
+            conversation = db.query(Conversation).filter(
+                and_(
+                    Conversation.id == conversation_id,
+                    Conversation.user_id == user_id
+                )
+            ).first()
+            
+            if not conversation:
+                return False
+            
+            db.delete(conversation)  # Cascade will delete messages
+            db.commit()
+            return True
+        except Exception as e:
+            db.rollback()
+            print(f"Error deleting conversation: {e}")
             return False
         finally:
             db.close()

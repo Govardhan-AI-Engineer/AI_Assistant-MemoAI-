@@ -64,10 +64,11 @@ class AnswerRefiner:
         retrieved_chunks: List[Dict[str, Any]],
         language: str = 'en',
         max_length: int = 500,
-        min_relevance: float = 0.3
+        min_relevance: float = 0.3,
+        conversation_history: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """
-        Refine answer using LLM
+        Refine answer using LLM with optional conversation history
         
         Args:
             question: User question
@@ -75,6 +76,7 @@ class AnswerRefiner:
             language: Target language
             max_length: Maximum answer length
             min_relevance: Minimum relevance threshold for using context
+            conversation_history: Optional list of previous messages in conversation
             
         Returns:
             Dictionary with:
@@ -106,7 +108,7 @@ class AnswerRefiner:
             }
         
         if self.use_llm and self.groq_client:
-            result = self._refine_with_llm(question, retrieved_chunks, language, max_length)
+            result = self._refine_with_llm(question, retrieved_chunks, language, max_length, conversation_history)
             result['is_from_context'] = True
             result['context_relevant'] = True
             return result
@@ -187,9 +189,10 @@ class AnswerRefiner:
         question: str,
         retrieved_chunks: List[Dict[str, Any]],
         language: str,
-        max_length: int
+        max_length: int,
+        conversation_history: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
-        """Refine answer using LLM with improved prompts"""
+        """Refine answer using LLM with improved prompts and optional conversation history"""
         try:
             # CRITICAL FIX: Filter chunks FIRST before preparing context
             # This ensures irrelevant chunks are never included in the LLM context
@@ -304,7 +307,25 @@ Write a clear, comprehensive, natural answer in {lang_name} that directly addres
             # Count how many chunks we're using
             num_chunks = len(filtered_chunks[:15])
             
-            user_prompt = f"""Question (in {lang_name}): {question}
+            # Build conversation history context if available
+            conversation_context = ""
+            if conversation_history and len(conversation_history) > 0:
+                conv_parts = []
+                for msg in conversation_history[-5:]:  # Last 5 messages for context
+                    if msg.get('role') == 'user':
+                        conv_parts.append(f"Previous question: {msg.get('content', '')[:150]}")
+                    elif msg.get('role') == 'assistant':
+                        conv_parts.append(f"Previous answer: {msg.get('content', '')[:200]}")
+                
+                if conv_parts:
+                    conversation_context = f"""
+PREVIOUS CONVERSATION CONTEXT:
+{chr(10).join(conv_parts)}
+
+CURRENT QUESTION (may be a follow-up to previous questions):
+"""
+            
+            user_prompt = f"""Question (in {lang_name}): {question}{conversation_context}
 
 Context from transcripts (MULTIPLE SOURCES - YOU HAVE {num_chunks} CHUNKS - USE ALL OF THEM):
 {context}
@@ -377,9 +398,10 @@ Provide a clear, comprehensive answer that directly addresses the question. Extr
         question: str,
         retrieved_chunks: List[Dict[str, Any]],
         language: str,
-        max_length: int
+        max_length: int,
+        conversation_history: Optional[List[Dict[str, Any]]] = None
     ):
-        """Stream answer using LLM (generator function)"""
+        """Stream answer using LLM (generator function) with optional conversation history"""
         try:
             # Prepare context from top chunks
             context_parts = []
@@ -407,6 +429,19 @@ Provide a clear, comprehensive answer that directly addresses the question. Extr
             filtered_chunks = self._filter_irrelevant_chunks(retrieved_chunks, question=question)
             retrieved_chunks = filtered_chunks if filtered_chunks else retrieved_chunks[:5]
             
+            # Build conversation history context if available
+            conversation_context = ""
+            if conversation_history and len(conversation_history) > 0:
+                conv_parts = []
+                for msg in conversation_history[-5:]:  # Last 5 messages
+                    if msg.get('role') == 'user':
+                        conv_parts.append(f"Previous question: {msg.get('content', '')[:150]}")
+                    elif msg.get('role') == 'assistant':
+                        conv_parts.append(f"Previous answer: {msg.get('content', '')[:200]}")
+                
+                if conv_parts:
+                    conversation_context = f"\n\nPREVIOUS CONVERSATION CONTEXT:\n{chr(10).join(conv_parts)}\n\nCURRENT QUESTION (may be a follow-up):\n"
+            
             # Prepare prompts
             lang_name = self._get_language_name(language)
             system_prompt = f"""You are a comprehensive information extractor. Answer questions using ONLY the information provided in the context below.
@@ -428,7 +463,7 @@ CRITICAL RELEVANCE RULE:
 
 CRITICAL: Do NOT say "context does not provide" - if information is missing, just omit it."""
             
-            user_prompt = f"""Question (in {lang_name}): {question}
+            user_prompt = f"""Question (in {lang_name}): {question}{conversation_context}
 
 Context from transcripts:
 {context}
@@ -865,11 +900,11 @@ Provide a clear, concise answer:"""
             chunk_norm = chunk_embedding / (np.linalg.norm(chunk_embedding) or 1.0)
             similarity = float(np.dot(question_norm, chunk_norm))
             
-            # STRICTER threshold: chunks with similarity >= 0.6 are considered relevant
-            # This is stricter than initial retrieval (which uses 0.2-0.3)
-            # because we want to filter out false positives, especially for multilingual content
-            # where words can have different meanings in different contexts
-            relevance_threshold = 0.6  # Increased from 0.5 to 0.6 for better topic discrimination
+            # STRICTER threshold: chunks with similarity >= 0.62 are considered relevant
+            # BGE-m3 provides better embeddings, so we can use stricter thresholds
+            # This is stricter than initial retrieval (which uses 0.2-0.3) to filter false positives
+            # For multilingual content with BGE-m3, we can be stricter while maintaining quality
+            relevance_threshold = 0.62  # Increased from 0.58 to 0.62 - BGE-m3 allows stricter filtering
             
             is_relevant = similarity >= relevance_threshold
             

@@ -65,15 +65,32 @@ class FAISSVectorStore:
         if self.index_file.exists() and self.metadata_file.exists():
             try:
                 # Load FAISS index
-                self.index = faiss.read_index(str(self.index_file))
+                loaded_index = faiss.read_index(str(self.index_file))
+                
+                # Check dimension match
+                loaded_dim = loaded_index.d
+                if loaded_dim != self.embedding_dim:
+                    print(f"⚠️  Dimension mismatch: Existing index has {loaded_dim} dimensions, but current model expects {self.embedding_dim}")
+                    print(f"⚠️  Creating new index with correct dimension. Old index will be overwritten on next save.")
+                    print(f"⚠️  You should re-index your transcripts with the new embedding model!")
+                    # Create new index with correct dimension
+                    self.index = faiss.IndexFlatIP(self.embedding_dim)
+                    self.metadata = []
+                    return
+                
+                # Dimensions match - use loaded index
+                self.index = loaded_index
                 
                 # Load metadata
                 with open(self.metadata_file, 'rb') as f:
                     self.metadata = pickle.load(f)
                 
-                print(f"✅ Loaded vector store for user {self.user_id}: {len(self.metadata)} vectors")
+                print(f"✅ Loaded vector store for user {self.user_id}: {len(self.metadata)} vectors (dimension: {self.embedding_dim})")
             except Exception as e:
-                print(f"⚠️  Failed to load existing index: {e}. Creating new index.")
+                import traceback
+                print(f"⚠️  Failed to load existing index: {e}")
+                print(f"Traceback: {traceback.format_exc()}")
+                print(f"Creating new index with dimension {self.embedding_dim}")
                 self.index = faiss.IndexFlatIP(self.embedding_dim)
                 self.metadata = []
     
@@ -151,6 +168,16 @@ class FAISSVectorStore:
         """
         if self.index.ntotal == 0:
             return []
+        
+        # Check embedding dimension match
+        query_dim = query_embedding.shape[0] if len(query_embedding.shape) == 1 else query_embedding.shape[1]
+        if query_dim != self.embedding_dim:
+            raise ValueError(
+                f"Embedding dimension mismatch: query has {query_dim} dimensions, "
+                f"but vectorstore expects {self.embedding_dim} dimensions. "
+                f"This usually means you changed the embedding model. "
+                f"Solution: Re-index your transcripts with the new model, or use the same model that was used for indexing."
+            )
         
         # Normalize query vector
         query_norm = query_embedding / (np.linalg.norm(query_embedding) or 1.0)

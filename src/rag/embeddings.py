@@ -22,10 +22,12 @@ class MultilingualEmbedder:
     
     # Recommended multilingual models (free, open-source)
     # These models support 100+ languages
-    DEFAULT_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"  # Fast, good quality
+    # BGE-m3 is state-of-the-art for multilingual retrieval
+    DEFAULT_MODEL = "BAAI/bge-m3"  # Best quality, multilingual, optimized for retrieval
     ALTERNATIVE_MODELS = [
+        "paraphrase-multilingual-MiniLM-L12-v2",  # Fast fallback, good quality
         "paraphrase-multilingual-mpnet-base-v2",  # Better quality, slower
-        "multilingual-e5-base",  # Excellent quality
+        "multilingual-e5-base",  # Excellent quality alternative
     ]
     
     def __init__(self, model_name: Optional[str] = None):
@@ -49,26 +51,45 @@ class MultilingualEmbedder:
         """Load the Sentence Transformer model"""
         try:
             print(f"Loading multilingual embedding model: {self.model_name}")
+            # BGE-m3 should work with sentence-transformers (requires version >= 2.2.0)
+            # If it fails, it will automatically fall back to alternative models
             self.model = SentenceTransformer(self.model_name)
             print(f"✅ Model {self.model_name} loaded successfully")
         except Exception as e:
+            import traceback
+            error_trace = traceback.format_exc()
             print(f"⚠️  Failed to load {self.model_name}: {e}")
+            print(f"Error traceback:\n{error_trace}")
+            
+            # Check if it's a version issue with BGE-m3
+            if 'bge-m3' in self.model_name.lower():
+                print(f"💡 Note: BGE-m3 requires sentence-transformers >= 2.2.0")
+                print(f"💡 If error persists, try: pip install --upgrade sentence-transformers")
+            
             # Try alternative models
             for alt_model in self.ALTERNATIVE_MODELS:
                 try:
                     print(f"Trying alternative model: {alt_model}")
                     self.model = SentenceTransformer(alt_model)
                     self.model_name = alt_model
-                    print(f"✅ Model {alt_model} loaded successfully")
+                    print(f"✅ Model {alt_model} loaded successfully (fallback)")
                     break
-                except Exception:
+                except Exception as alt_error:
+                    print(f"⚠️  Alternative model {alt_model} also failed: {alt_error}")
                     continue
             
             if self.model is None:
-                raise RuntimeError(
+                error_msg = (
                     f"Failed to load any multilingual embedding model. "
-                    f"Tried: {self.model_name}, {', '.join(self.ALTERNATIVE_MODELS)}"
+                    f"Tried: {self.model_name}, {', '.join(self.ALTERNATIVE_MODELS)}. "
+                    f"Last error: {str(e)}. "
                 )
+                if 'bge-m3' in str(self.model_name).lower():
+                    error_msg += (
+                        f"BGE-m3 may require: pip install --upgrade sentence-transformers. "
+                        f"Or use paraphrase-multilingual-MiniLM-L12-v2 as fallback."
+                    )
+                raise RuntimeError(error_msg)
     
     def embed_text(self, text: str) -> np.ndarray:
         """
@@ -88,8 +109,13 @@ class MultilingualEmbedder:
             # Return zero vector with correct dimension
             return np.zeros(self.model.get_sentence_embedding_dimension())
         
-        embedding = self.model.encode(text, convert_to_numpy=True)
-        return embedding
+        try:
+            embedding = self.model.encode(text, convert_to_numpy=True)
+            return embedding
+        except Exception as e:
+            print(f"⚠️  Error encoding text: {e}")
+            # Return zero vector with correct dimension as fallback
+            return np.zeros(self.model.get_sentence_embedding_dimension())
     
     def embed_batch(self, texts: List[str], batch_size: int = 64, show_progress: bool = False) -> np.ndarray:
         """

@@ -58,7 +58,15 @@ class RAGQAEngine:
         
         # Initialize vector store
         embedding_dim = self.embedder.get_embedding_dimension()
+        print(f"📊 Using embedding model: {self.embedder.model_name} (dimension: {embedding_dim})")
+        
+        # Initialize vectorstore - it will check dimension compatibility automatically
         self.vectorstore = FAISSVectorStore(user_id=user_id, embedding_dim=embedding_dim)
+        
+        # Warn if index exists but is empty (might have been reset due to dimension mismatch)
+        if self.vectorstore.index.ntotal == 0 and (self.vectorstore.index_file.exists() or self.vectorstore.metadata_file.exists()):
+            print(f"⚠️  WARNING: Vectorstore was reset due to dimension mismatch or corruption")
+            print(f"⚠️  You need to re-index your transcripts with model: {self.embedder.model_name}")
         
         # Initialize advanced components
         if enable_advanced:
@@ -286,12 +294,14 @@ class RAGQAEngine:
         self,
         question: str,
         top_k: int = 10,  # Increased from 5 to 10 for better fact coverage
-        min_similarity: float = 0.2,  # Lower default for better multilingual support
+        min_similarity: float = 0.3,  # Increased from 0.2 to 0.3 - BGE-m3 allows stricter default
         include_citations: bool = True,
-        use_advanced: Optional[bool] = None
+        use_advanced: Optional[bool] = None,
+        conversation_id: Optional[int] = None,
+        session_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Answer a question using Advanced RAG
+        Answer a question using Advanced RAG with optional conversation context
         
         Args:
             question: User question (any language)
@@ -299,6 +309,8 @@ class RAGQAEngine:
             min_similarity: Minimum similarity threshold
             include_citations: Include citations in response
             use_advanced: Override enable_advanced setting
+            conversation_id: Optional conversation ID for context
+            session_id: Optional session ID (creates new conversation if not exists)
             
         Returns:
             Dictionary with:
@@ -309,8 +321,71 @@ class RAGQAEngine:
             - 'validation': Response validation results
             - 'query_rewritten': Rewritten query (if advanced)
             - 'search_method': Search method used
+            - 'conversation_id': Conversation ID (if using conversation context)
+            - 'session_id': Session ID (if using conversation context)
         """
         use_advanced = use_advanced if use_advanced is not None else self.enable_advanced
+        
+        # Handle conversation context
+        conversation_history = []
+        current_conversation_id = conversation_id
+        current_session_id = session_id
+        
+        if session_id or conversation_id:
+            # Get or create conversation
+            if session_id and not conversation_id:
+                conv = self.storage_service.get_conversation(
+                    user_id=self.user_id,
+                    session_id=session_id
+                )
+                if conv:
+                    current_conversation_id = conv['conversation_id']
+                else:
+                    # Create new conversation
+                    query_lang = self.detect_query_language(question)
+                    new_conv = self.storage_service.create_conversation(
+                        user_id=self.user_id,
+                        session_id=session_id,
+                        language=query_lang
+                    )
+                    current_conversation_id = new_conv['conversation_id']
+                    current_session_id = new_conv['session_id']
+            
+            # Get conversation history
+            if current_conversation_id:
+                conv = self.storage_service.get_conversation(
+                    user_id=self.user_id,
+                    conversation_id=current_conversation_id
+                )
+                if conv and conv.get('messages'):
+                    # Get last N messages for context (avoid token limits)
+                    conversation_history = conv['messages'][-10:]  # Last 10 messages
+                    
+                    # Enhance question with conversation context if available
+                    if conversation_history:
+                        # Build context summary from recent messages
+                        recent_context = []
+                        for msg in conversation_history[-5:]:  # Last 5 messages
+                            if msg['role'] == 'user':
+                                recent_context.append(f"Previous question: {msg['content'][:100]}")
+                            elif msg['role'] == 'assistant':
+                                recent_context.append(f"Previous answer: {msg['content'][:150]}")
+                        
+                        if recent_context:
+                            # Add context to question for better understanding
+                            context_summary = " | ".join(recent_context)
+                            # Note: We'll use this in the answer refinement, not in search
+                            question_with_context = question
+                        else:
+                            question_with_context = question
+                    else:
+                        question_with_context = question
+                else:
+                    question_with_context = question
+            else:
+                question_with_context = question
+        else:
+            question_with_context = question
         
         # Detect query language
         query_lang = self.detect_query_language(question)
@@ -341,12 +416,14 @@ class RAGQAEngine:
         # Step 2: Hybrid Search (if advanced) or Semantic Search
         if use_advanced and self.hybrid_search:
             # Use hybrid search (semantic + keyword)
+            # Use stricter minimum with BGE-m3 - better embeddings allow higher thresholds
+            min_hybrid_score = max(min_similarity, 0.3)  # Increased from 0.2 to 0.3 for better filtering
             results = self.hybrid_search.search(
                 query=question,
                 top_k=top_k * 3,  # Get more for better multilingual matching
                 semantic_weight=0.7,
                 keyword_weight=0.3,
-                min_score=min_similarity * 0.7  # More lenient for multilingual
+                min_score=min_hybrid_score  # Reasonable threshold
             )
             search_method = 'hybrid'
         else:
@@ -370,26 +447,24 @@ class RAGQAEngine:
                 results = reranked_candidates + other_results
                 results.sort(key=lambda x: x[1], reverse=True)
         
-        # Filter by similarity threshold - more lenient for multilingual
+        # Filter by similarity threshold - STRICTER: Reduce irrelevant chunks
         if results:
-            # For multilingual/cross-lingual queries, use a more lenient threshold
-            # Cross-lingual semantic similarity can be lower but still relevant
-            base_threshold = min_similarity
-            multilingual_threshold = base_threshold * 0.7  # 30% more lenient
+            # Use stricter minimum threshold to filter out irrelevant chunks early
+            # BGE-m3 provides better embeddings, so we can use higher thresholds
+            base_threshold = max(min_similarity, 0.35)  # Increased from 0.25 to 0.35 for better filtering
+            multilingual_threshold = base_threshold  # Don't reduce further
             
             filtered_results = [
-            (meta, score) for meta, score in results
+                (meta, score) for meta, score in results
                 if score >= multilingual_threshold
             ]
             
-            # If still no results but we have some, use top results anyway
-            if not filtered_results and results:
-                # Use top results even if slightly below threshold
-                # This helps with cross-lingual matching
-                filtered_results = results[:top_k]
-                if filtered_results:
-                    top_score = filtered_results[0][1] if filtered_results else 0
-                    print(f"📊 Using lenient threshold for multilingual matching. Top score: {top_score:.3f}")
+            # CRITICAL FIX: If no results meet threshold, DON'T use irrelevant chunks
+            # Instead, return empty and let the system use general knowledge
+            if not filtered_results:
+                top_score = results[0][1] if results else 0.0
+                print(f"⚠️  No chunks meet similarity threshold ({multilingual_threshold:.3f}). Top score: {top_score:.3f}")
+                filtered_results = []
         else:
             filtered_results = []
         
@@ -403,7 +478,7 @@ class RAGQAEngine:
                 question_norm = question_embedding / (np.linalg.norm(question_embedding) or 1.0)
                 
                 semantically_filtered = []
-                for meta, score in filtered_results[:top_k * 2]:  # Check top 2x results
+                for i, (meta, score) in enumerate(filtered_results[:top_k * 2]):  # Check top 2x results
                     chunk_text = meta.get('text', '') or meta.get('content', '') or meta.get('chunk_text', '')
                     if not chunk_text:
                         continue
@@ -413,24 +488,69 @@ class RAGQAEngine:
                     chunk_norm = chunk_embedding / (np.linalg.norm(chunk_embedding) or 1.0)
                     semantic_similarity = float(np.dot(question_norm, chunk_norm))
                     
-                    # Use STRICTER threshold for semantic filtering (0.55 for multilingual)
-                    # This is higher than initial retrieval threshold to remove false positives
-                    # For multilingual content, we need higher threshold to avoid topic confusion
-                    semantic_threshold = 0.55  # Increased from 0.45 to 0.55
+                    # STRICTER threshold for semantic filtering - BGE-m3 provides better embeddings
+                    # Use adaptive threshold: stricter for all chunks to reduce irrelevant content
+                    # BGE-m3 embeddings are more accurate, so we can use higher thresholds
+                    base_threshold = 0.60  # Increased from 0.55 to 0.60 - BGE-m3 allows this
+                    # Top chunks get 0.60, lower chunks need 0.65 for better topic discrimination
+                    adaptive_threshold = base_threshold if i < top_k else base_threshold + 0.05
+                    semantic_threshold = adaptive_threshold
+                    
                     if semantic_similarity >= semantic_threshold:
                         semantically_filtered.append((meta, score))
                     else:
-                        print(f"🔍 Semantic filter removed chunk (sim: {semantic_similarity:.3f} < {semantic_threshold}): {chunk_text[:80]}...")
+                        print(f"🔍 Semantic filter removed chunk (sim: {semantic_similarity:.3f} < {semantic_threshold:.3f}): {chunk_text[:80]}...")
                 
-                # If semantic filtering removed too many, keep at least top_k
-                if len(semantically_filtered) >= top_k:
-                    filtered_results = semantically_filtered
-                elif len(semantically_filtered) > 0:
-                    # Keep semantic filtered + top from original to ensure we have enough
-                    remaining_needed = top_k - len(semantically_filtered)
-                    remaining = [(meta, score) for meta, score in filtered_results if (meta, score) not in semantically_filtered]
-                    filtered_results = semantically_filtered + remaining[:remaining_needed]
-                # If all filtered out, keep original (don't break the pipeline)
+                # Balanced approach: Keep semantically filtered chunks, but if too many filtered out,
+                # be more lenient to ensure we have enough context for good answers
+                if len(semantically_filtered) >= 1:
+                    # If we have at least some filtered chunks, use them
+                    if len(semantically_filtered) >= top_k // 2:
+                        # We have enough chunks - use filtered results
+                        filtered_results = semantically_filtered[:top_k]
+                        print(f"✅ Kept {len(filtered_results)} semantically relevant chunks (adaptive threshold)")
+                    else:
+                        # Too few chunks - use stricter lenient mode to avoid irrelevant chunks
+                        # Only use lenient mode if we have very few chunks (< 2)
+                        if len(semantically_filtered) < 2:
+                            # Use stricter lenient threshold (0.58 instead of 0.52) to maintain quality
+                            lenient_filtered = []
+                            for meta, score in filtered_results[:top_k]:
+                                chunk_text = meta.get('text', '') or meta.get('content', '') or meta.get('chunk_text', '')
+                                if not chunk_text:
+                                    continue
+                                chunk_embedding = self.embedder.embed_text(chunk_text)
+                                chunk_norm = chunk_embedding / (np.linalg.norm(chunk_embedding) or 1.0)
+                                semantic_similarity = float(np.dot(question_norm, chunk_norm))
+                                if semantic_similarity >= 0.58:  # Stricter lenient threshold
+                                    lenient_filtered.append((meta, score))
+                            filtered_results = lenient_filtered[:top_k] if lenient_filtered else semantically_filtered
+                            print(f"✅ Kept {len(filtered_results)} chunks (strict lenient mode, had {len(semantically_filtered)} strict matches)")
+                        else:
+                            # Use what we have - better to have fewer relevant chunks than many irrelevant ones
+                            filtered_results = semantically_filtered[:top_k]
+                            print(f"✅ Kept {len(filtered_results)} semantically relevant chunks (strict mode)")
+                else:
+                    # All chunks filtered out - try with strict lenient threshold (0.58) as last resort
+                    # Don't go too lenient to avoid irrelevant chunks
+                    print(f"⚠️  All chunks filtered by strict threshold, trying strict lenient mode...")
+                    lenient_filtered = []
+                    for meta, score in filtered_results[:top_k]:
+                        chunk_text = meta.get('text', '') or meta.get('content', '') or meta.get('chunk_text', '')
+                        if not chunk_text:
+                            continue
+                        chunk_embedding = self.embedder.embed_text(chunk_text)
+                        chunk_norm = chunk_embedding / (np.linalg.norm(chunk_embedding) or 1.0)
+                        semantic_similarity = float(np.dot(question_norm, chunk_norm))
+                        if semantic_similarity >= 0.58:  # Stricter last resort threshold (was 0.50)
+                            lenient_filtered.append((meta, score))
+                    if lenient_filtered:
+                        filtered_results = lenient_filtered[:top_k]
+                        print(f"✅ Kept {len(filtered_results)} chunks with strict lenient threshold (0.58)")
+                    else:
+                        # Truly no relevant chunks - better to return empty than irrelevant chunks
+                        print(f"⚠️  All chunks filtered out - no relevant content found")
+                        filtered_results = []
             except Exception as e:
                 print(f"⚠️  Semantic filtering failed: {e}, using original results")
         
@@ -468,44 +588,60 @@ class RAGQAEngine:
         retrieved_chunks = [meta for meta, _ in filtered_results] if filtered_results else []
         
         # Step 4: Check if context is relevant
+        # CRITICAL FIX: Properly check if context is relevant
         # First check if it's a greeting/short query (should use general knowledge)
         question_lower = original_question.lower().strip()
         short_greetings = {'hi', 'hey', 'hello', 'bye', 'thanks', 'thank you', 'ok', 'okay', 'yes', 'no',
                           'नमस्ते', 'हैलो', 'धन्यवाद', 'ठीक', 'हाँ', 'नहीं',
                           'నమస్కారం', 'హలో', 'ధన్యవాదాలు', 'సరే', 'అవును', 'కాదు'}
-        is_greeting_or_short = len(question_lower) <= 3 or question_lower in short_greetings
+        # Check for greetings like "hi how are you", "hello there", etc.
+        is_greeting = (
+            question_lower in short_greetings or
+            question_lower.startswith('hi ') or
+            question_lower.startswith('hey ') or
+            question_lower.startswith('hello ') or
+            'how are you' in question_lower or
+            'how do you do' in question_lower or
+            len(question_lower.split()) <= 3 and not any(
+                word in question_lower for word in ['what', 'when', 'where', 'who', 'why', 'how', 'which', 'explain', 'describe', 'tell', 'show', 'list', 'give']
+            )
+        )
         
         context_relevant = False
-        if is_greeting_or_short:
+        if is_greeting:
             # Greetings/short queries should use general knowledge
+            print(f"💬 Detected greeting/short query: '{original_question}' - using general knowledge")
             context_relevant = False
-        elif retrieved_chunks and len(retrieved_chunks) > 0:
-            # CRITICAL FIX: If we have retrieved chunks, they're likely relevant
-            # Even if similarity is slightly low, use them for multilingual queries
-            # Semantic search already did the filtering
-            context_relevant = True  # Always consider relevant if chunks exist
-            
-            # Only do additional check if using advanced features AND similarity is very low
-            if use_advanced and self.refiner:
-                # Check average similarity of top results
-                avg_similarity = sum(score for _, score in filtered_results[:3]) / len(filtered_results[:3]) if filtered_results[:3] else 0
-                if avg_similarity < 0.15:
-
-                    # Very low similarity - do additional check
-                    context_relevant = self.refiner._check_context_relevance(
-                original_question,
-                retrieved_chunks,
-                min_similarity
-            )
-                else:
-                    # Similarity is reasonable - trust semantic search
-                    context_relevant = True
-            else:
-                # If we have chunks above similarity threshold, consider relevant
-                context_relevant = True
         elif filtered_results:
-            # Fallback: if we have results above threshold, consider relevant
-            context_relevant = True
+            # We have chunks - but need to verify they're actually relevant
+            # Check average similarity of top results
+            top_scores = [score for _, score in filtered_results[:3]]
+            avg_similarity = sum(top_scores) / len(top_scores) if top_scores else 0
+            max_similarity = max(top_scores) if top_scores else 0
+            
+            print(f"📊 Top similarity scores: max={max_similarity:.3f}, avg={avg_similarity:.3f}")
+            
+            # CRITICAL: Require minimum similarity to consider relevant
+            # BGE-m3 provides better embeddings, so we can require higher similarity
+            min_acceptable_similarity = 0.35  # Increased from 0.3 to 0.35 - BGE-m3 allows stricter filtering
+            if max_similarity < min_acceptable_similarity:
+                print(f"⚠️  Max similarity {max_similarity:.3f} below minimum {min_acceptable_similarity} - not relevant")
+                context_relevant = False
+            elif use_advanced and self.refiner:
+                # Do additional semantic relevance check
+                context_relevant = self.refiner._check_context_relevance(
+                    original_question,
+                    retrieved_chunks,
+                    min_similarity
+                )
+                if not context_relevant:
+                    print(f"⚠️  Context relevance check failed - chunks not relevant to question")
+            else:
+                # Similarity is acceptable - consider relevant
+                context_relevant = True
+        else:
+            # No results found
+            context_relevant = False
         
         # Step 5: Answer Refinement
         is_from_context = False
@@ -520,7 +656,8 @@ class RAGQAEngine:
                     question=original_question,
                     retrieved_chunks=retrieved_chunks[:15],  # Increased from 8 to 15 for better coverage
                     language=query_lang,
-                    min_relevance=min_similarity
+                    min_relevance=min_similarity,
+                    conversation_history=conversation_history  # Pass conversation history
                 )
                 
                 if refined.get('refined_answer'):
@@ -645,6 +782,38 @@ class RAGQAEngine:
                 }
                 citations.append(citation)
         
+        # Save to conversation if using conversation context
+        if current_conversation_id and answer:
+            try:
+                # Save user question
+                self.storage_service.add_message(
+                    user_id=self.user_id,
+                    conversation_id=current_conversation_id,
+                    role='user',
+                    content=original_question,
+                    metadata={'language': query_lang}
+                )
+                
+                # Save assistant answer
+                answer_metadata = {
+                    'language': query_lang,
+                    'citations': citations,
+                    'num_chunks': len(retrieved_chunks[:top_k]) if is_from_context else 0,
+                    'is_from_context': is_from_context,
+                    'refinement_method': refinement_method,
+                    'search_method': search_method
+                }
+                
+                self.storage_service.add_message(
+                    user_id=self.user_id,
+                    conversation_id=current_conversation_id,
+                    role='assistant',
+                    content=answer,
+                    metadata=answer_metadata
+                )
+            except Exception as e:
+                print(f"⚠️  Failed to save conversation message: {e}")
+        
         return {
             'answer': answer,
             'language': query_lang,
@@ -656,7 +825,9 @@ class RAGQAEngine:
             'search_method': search_method,
             'refinement_method': refinement_method,
             'is_from_context': is_from_context,
-            'context_relevant': context_relevant
+            'context_relevant': context_relevant,
+            'conversation_id': current_conversation_id,
+            'session_id': current_session_id
         }
     
     def _format_answer(self, answer: str, question: str) -> str:

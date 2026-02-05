@@ -227,3 +227,72 @@ class ExportFile(Base):
         Index('idx_export_user_type', 'user_id', 'file_type'),
         Index('idx_export_transcript', 'transcript_id', 'file_type'),
     )
+
+
+class Conversation(Base):
+    """
+    Conversation session for RAG queries
+    Enables multi-turn conversations with context persistence
+    """
+    __tablename__ = 'conversations'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String(64), unique=True, nullable=False, index=True)  # Unique session ID
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    
+    # Conversation metadata
+    title = Column(String(200), nullable=True)  # Auto-generated from first question
+    language = Column(String(10), nullable=True)  # Primary language of conversation
+    
+    # Metadata
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    messages = relationship("ConversationMessage", back_populates="conversation", cascade="all, delete-orphan", order_by="ConversationMessage.created_at")
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_conversation_user_created', 'user_id', 'created_at'),
+        Index('idx_conversation_session', 'session_id'),
+    )
+
+
+class ConversationMessage(Base):
+    """
+    Individual messages in a conversation
+    Stores both user questions and assistant answers with metadata
+    """
+    __tablename__ = 'conversation_messages'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    conversation_id = Column(Integer, ForeignKey('conversations.id'), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    
+    # Message content
+    role = Column(String(20), nullable=False)  # 'user' or 'assistant'
+    content = Column(Text, nullable=False)  # Question or answer text
+    
+    # RAG metadata (stored as JSON)
+    # Note: Using 'message_metadata' instead of 'metadata' because 'metadata' is reserved by SQLAlchemy
+    message_metadata = Column('metadata', JSON, nullable=True)  # Store citations, chunks used, similarity scores, etc.
+    # Example message_metadata structure:
+    # {
+    #   'citations': [...],
+    #   'num_chunks': 5,
+    #   'is_from_context': True,
+    #   'similarity_scores': [...],
+    #   'refinement_method': 'langchain'
+    # }
+    
+    # Metadata
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    # Relationships
+    conversation = relationship("Conversation", back_populates="messages")
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_message_conversation_created', 'conversation_id', 'created_at'),
+        Index('idx_message_user_created', 'user_id', 'created_at'),
+    )
